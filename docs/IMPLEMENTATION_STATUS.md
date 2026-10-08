@@ -183,3 +183,53 @@ No Docker service, actual vLLM image or GPU inference ran. P1 deployment and P4
 hardware acceptance remain open. No release bundle was rebuilt or published by
 this update. Obtain exact hardware/image/model pins and run the documented
 customer acceptance before making a hardware support commitment.
+
+## Universal workflow evidence and Flower preview — 2026-10-09
+
+The [workflow guide](WORKFLOW_EVIDENCE.md) defines a framework-independent event
+and receiver-policy contract. The first [Flower adapter](../integrations/flower/README.md)
+uses the same contract for manufacturing and pharmaceutical synthetic scenarios.
+There are no industry-specific fields in signed events.
+
+- Added `apostille-workflow` for dedicated key creation, metadata signing,
+  independent-policy verification and archive sequence checks. It reuses the
+  released Core 0.1 dependency without changing Core bytes or Go dependencies.
+- Added the Python `WorkflowRecorder` and explicit receipt outcomes, with no new
+  native SDK runtime dependencies. Private archives, per-archive locking,
+  verified sequence recovery, monotonic terminal rounds and verification before
+  publication handle receipt failures separately from training results.
+- Added an optional Flower 1.39.0 / NumPy 2.2.6 example: three synthetic sites,
+  three CPU rounds, real `ClientApp` and `FedAvg`, with in-process transport.
+  Default output is 13 signed metadata receipts. Explicit synthetic release
+  approval adds a model file plus release/acceptance receipts, for 15 total.
+- Receipts exclude samples, gradients, metrics, prompts, outputs and free-form
+  errors. Model-byte binding requires an explicit release/acceptance operation.
+  Independent pins and event permissions are checked offline. Archive completeness,
+  actual execution, content truth and current authorization remain unknown.
+- Cross-layer review corrected stale-round handling, policy-context checks,
+  same-filesystem publication, adapter/recorder configuration matching and
+  Flower reply run/request/task correlation. Framework checkpoints and a single
+  training owner are still required; receipts do not guarantee exactly-once work.
+
+Final software verification on the macOS arm64 host:
+
+| Check | Result |
+| --- | --- |
+| `make check` | Passed: Go tests/race/vet, 55 SDK tests, 11 real Go CLI workflow tests, 13 deployment tests, 17 API checker tests, both Compose renders, native/OpenAI/LangChain TLS integration and four command builds. |
+| `make flower-test` | Passed: 19 tests, zero skips, including both signed scenarios, explicit release, artifact tampering, cancellation/failure, restart replay and reply correlation. |
+| `make security` | `govulncheck v1.1.4`: no vulnerabilities found. |
+| CI workflow lint | `actionlint v1.7.7` with ShellCheck v0.11.0 passed. |
+| Local preview | Built under `dist/0.1.0-alpha.1-workflow-preview/`: four Linux amd64 binaries, generic SDK wheel/sdist, schemas, checksums, software SPDX and notices. No registry publication. |
+| Installed SDK wheel | Offline installation into a fresh host Python 3.14 environment passed all 55 SDK tests; the workflow module was imported from the installed wheel. |
+
+The signed Flower tests block Python socket and DNS calls. This establishes the
+single-process example's behavior; it is not kernel-enforced network isolation
+or multi-host acceptance. Flower dependencies remain outside the native SDK
+wheelhouse and software SPDX. A customer Flower package needs its own full
+dependency inventory, hashes, notices and scan.
+
+No distributed Flower deployment, GPU training, secure aggregation, differential
+privacy, NVIDIA FLARE/OpenFL adapter or pharmaceutical validation was delivered.
+No model was activated in the inference gateway. Workflow archives have no
+automatic expiry; customers must define retention and access policy. Existing
+P1 deployment and P4 hardware gates remain open.

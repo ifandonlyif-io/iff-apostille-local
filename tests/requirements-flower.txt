@@ -1,0 +1,4 @@
+# Optional CPU Flower example/test environment only. Not SDK dependencies.
+# Install during controlled preparation; demo runtime never invokes pip/uv.
+flwr==1.39.0
+numpy==2.2.6

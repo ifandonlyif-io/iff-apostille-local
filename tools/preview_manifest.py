@@ -25,7 +25,7 @@ for directory in ("deploy", "docs", "api"):
     for source in sorted((root / directory).rglob("*")):
         if not source.is_file() or source.is_symlink():
             continue
-        if source.suffix not in (".md", ".yml", ".yaml", ".py", ".example") and source.name != "Dockerfile":
+        if source.suffix not in (".md", ".yml", ".yaml", ".py", ".example") and source.name != "Dockerfile" and not source.name.endswith(".schema.json"):
             continue
         target = out / source.relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)

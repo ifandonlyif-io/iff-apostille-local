@@ -49,6 +49,21 @@ Include them in a build-environment SBOM if distributing that environment.
 
 ## Runtime and model exclusions
 
+### Optional Flower integration
+
+The source-only CPU demonstration directly pins `flwr==1.39.0` (Apache-2.0,
+[upstream](https://github.com/flwrlabs/flower)) and `numpy==2.2.6` (BSD-3-Clause,
+[upstream](https://github.com/numpy/numpy)) in
+[`tests/requirements-flower.txt`](../tests/requirements-flower.txt). These are
+optional integration/test dependencies, not native SDK or Go gateway runtime
+dependencies. No upstream framework source is vendored here. The requirement
+file pins direct dependencies; it is not a complete transitive hash lock.
+Inventory all resolved packages and preserve their actual license texts before
+redistributing a Flower environment. That environment is excluded from the
+native SDK preview wheelhouse and its SPDX inventory.
+
+### Inference deployment
+
 No inference container, GPU driver, model weight, tokenizer, remote-code plugin or
 vendor management package is licensed by this repository's MIT license. The
 customer deployment must inventory its exact image digest, OS packages, CUDA or

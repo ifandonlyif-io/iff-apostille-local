@@ -18,6 +18,7 @@ Apostille Core 0.1. It is not a validated pharmaceutical system.
 | Structured output | Strict schema with a bounded keyword subset |
 | Customer integrations | OpenAI Chat Completions subset, project-scoped capability discovery, client-executed function calls |
 | Evidence | Opt in using `X-Apostille-Record: metadata`; authenticated retrieval and exact-byte download by run ID |
+| Workflow evidence | Optional local CLI/SDK for signed workflow assertions, explicit receiver policy and offline archive verification |
 | SDK | Python 3.11+, sync/async, streaming context managers, token-file authentication |
 | Deployment | Operator-supplied pinned runtime image and pre-staged model artifacts |
 
@@ -41,6 +42,10 @@ receivers need independently supplied exact key pins for trust.
    hardware or latency commitment.
 5. Follow [administrator operations](docs/OPERATIONS.md) and
    [release checklist](docs/RELEASE.md) for maintenance.
+6. For customer-owned training or model-delivery workflows, see
+   [universal workflow evidence](docs/WORKFLOW_EVIDENCE.md) and the optional
+   [Flower CPU example](integrations/flower/README.md). These use a separate
+   event profile and archive; the gateway does not become a training service.
 
 The repository requires Go 1.25+ (toolchain pinned by `go.mod`). For SDK work:
 
@@ -62,6 +67,13 @@ make PYTHON=.venv/bin/python sdk-test integration
 make PYTHON=.venv/bin/python deployment-test compose-check acceptance-test
 make fuzz
 ```
+
+`make check` also exercises the generic Python workflow recorder against the
+real Go signing/verifying CLI. Optional `make flower-test` uses the pinned
+dependencies in `tests/requirements-flower.txt` to test actual Flower callbacks
+and aggregation with synthetic CPU data. Flower is not a gateway or native SDK
+runtime dependency. Its example does not establish multi-site privacy or GPU
+support; see [the integration guide](docs/WORKFLOW_EVIDENCE.md).
 
 For a local software preview bundle, install build tools into the virtual
 environment and follow [RELEASE.md](docs/RELEASE.md). See

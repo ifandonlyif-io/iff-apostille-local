@@ -283,3 +283,13 @@ python -m build sdk/python
 Tests use synthetic data and `httpx.MockTransport`; they do not verify a GPU,
 container, deployed gateway or actual model output. Production applications
 should not replace the default transport with a retrying or unverified transport.
+
+## Optional workflow recorder
+
+`apostille_local.workflow.WorkflowRecorder` records a bounded set of workflow
+assertions through the local `apostille-workflow` Go CLI. It uses explicit key
+and policy file paths, a private per-agent archive and independent producer pins.
+It adds no Python cryptography or FL runtime dependency. Training results and
+receipt outcomes remain separate. See the repository's
+[workflow guide](../../docs/WORKFLOW_EVIDENCE.md) for the schema, examples,
+retention policy and offline verification contract.

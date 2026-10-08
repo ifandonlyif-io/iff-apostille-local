@@ -81,3 +81,21 @@ reject these new metadata records. Apostille Core 0.1 signatures are unchanged.
 Use synthetic text for repository tests. Evaluate customer-confidential cases
 only inside their approved environment. Product claims must remain within the
 actual [acceptance record](SUPPORT_MATRIX.md).
+
+## Optional workflow evidence boundary
+
+The standalone workflow CLI and Python recorder follow
+[WORKFLOW_EVIDENCE.md](WORKFLOW_EVIDENCE.md). Their archives are operator-owned
+local files with no automatic expiry or HTTP access service. Project/job/agent
+and event permissions are checked against an independently supplied receiver
+policy. Process locks coordinate recorder writers; they cannot stop an authorized
+host administrator from removing files, replacing policy or using the key.
+Sequence checks detect replay/gaps in the supplied prefix, not omitted suffixes
+or whole producer streams. Receipt validity does not establish archive completeness,
+live revocation, actual execution, differential privacy, non-exfiltration or an
+organization's legal identity. Model bytes are bound only on explicit release
+or acceptance; the original must be supplied separately to verify that binding.
+No private sample, raw update, gradient, per-site metric or free-form log enters
+the event schema. Opaque metadata, digests, public keys and timestamps can still
+identify or correlate activity. The customer controls export, retention and
+backup policies independently of inference records' 24-hour lifetime.

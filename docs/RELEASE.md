@@ -50,6 +50,15 @@ the exact dependency version selected in `go.mod`.
 
 ## Required release artifacts
 
+The preview also builds `apostille-workflow`, includes its event/policy schemas,
+and packages the generic Python recorder in the native SDK wheel. The optional
+Flower adapter/example is tested from the source checkout; Flower and its
+transitive training dependencies are not in the native SDK wheelhouse or its
+SBOM. Before shipping that integration for isolated customer use, prepare a
+separate fully pinned wheel inventory, license bundle and dependency scan, run
+`make flower-test`, and complete the actual deployment acceptance. The synthetic
+CPU demonstration is not that acceptance.
+
 - Source revision and release notes with known limitations and supported tuple.
 - Gateway/operator binaries with SHA-256 checksums and target OS/architecture.
 - Python wheel/sdist and exact resolved dependency hashes.
