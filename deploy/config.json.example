@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "listen": "0.0.0.0:8443",
+  "tls_cert_file": "/tls/server.crt",
+  "tls_key_file": "/tls/server.key",
+  "runtime_url": "http://runtime:8000",
+  "active_model": "qwen3-4b",
+  "models": [
+    {
+      "id": "qwen3-4b",
+      "revision": "REPLACE_WITH_REVIEWED_QWEN3_4B_REVISION",
+      "manifest_sha256": "REPLACE_WITH_TRUSTED_BUNDLE_MANIFEST_SHA256",
+      "license": "REPLACE_WITH_REVIEWED_MODEL_LICENSE",
+      "runtime_image": "REPLACE_WITH_QUALIFIED_VLLM_REPOSITORY@sha256:REPLACE_WITH_REAL_IMAGE_DIGEST",
+      "precision": "bfloat16",
+      "max_context": 4096,
+      "max_tokens": 512,
+      "max_concurrent": 1,
+      "path": "REPLACE_WITH_ABSOLUTE_HOST_BUNDLE_PATH"
+    }
+  ],
+  "projects": [
+    {
+      "id": "pilot",
+      "api_key_sha256": "REPLACE_WITH_KEY_CREATE_HASH_NEVER_THE_KEY_VALUE",
+      "models": ["qwen3-4b"],
+      "max_concurrent": 1
+    }
+  ],
+  "evidence": {"directory": "", "key_file": "", "agent_id": ""},
+  "timeout_seconds": 120
+}

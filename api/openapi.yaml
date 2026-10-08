@@ -1,0 +1,263 @@
+openapi: 3.1.0
+info:
+  title: Apostille Local
+  version: 0.1.0-alpha.1
+  description: >-
+    Experimental, project-authenticated text inference gateway. No tools, RAG,
+    cloud fallback or model administration API. Receipts are optional signed
+    metadata assertions, not proof of output content or actual model execution.
+servers:
+  - url: https://gateway.example.internal:8443
+security:
+  - ProjectToken: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Process liveness
+      security: []
+      responses:
+        '200':
+          description: Process is responding; does not establish runtime readiness.
+  /readyz:
+    get:
+      operationId: readiness
+      summary: Active runtime model readiness
+      security: []
+      responses:
+        '200':
+          description: Runtime advertises the active model and gateway is not draining.
+        '503':
+          $ref: '#/components/responses/Error'
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: List the authenticated project's available active model
+      description: >-
+        Returns the active model only if authorized for this project and advertised
+        by the runtime readiness check. Otherwise data is empty. The full configured
+        catalog is not exposed; one model is active per deployment.
+      responses:
+        '200':
+          description: Model catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: {const: list}
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id]
+                      properties:
+                        id: {type: string}
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: Generate one text completion or SSE stream
+      description: >-
+        Unknown request fields are rejected, including n, tools, tool_choice,
+        functions, seed and stream_options. Content must be nonempty text.
+        No automatic retry: a network failure can occur after work has started.
+        The run header is available once the gateway accepts a run.
+        Request bodies are capped at 1 MiB. Runtime responses/streams are capped
+        at 2 MiB in this preview.
+      parameters:
+        - in: header
+          name: X-Apostille-Record
+          required: false
+          schema: {type: string, enum: [metadata]}
+          description: Opt in to a producer-signed metadata receipt; no prompt/completion retention.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: >-
+            JSON completion, or SSE data events containing OpenAI-style choice
+            deltas followed by data: [DONE]. A stream error may occur after HTTP
+            headers are sent. A missing [DONE] indicates an incomplete stream.
+            Structured-output deltas are provisional until final validation
+            succeeds and [DONE] is received.
+          headers:
+            X-Apostille-Run-ID:
+              schema: {type: string}
+              description: Correlation identifier; not an authorization credential.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [choices]
+                properties:
+                  id: {type: string}
+                  object: {type: string}
+                  model: {type: string}
+                  choices:
+                    type: array
+                    minItems: 1
+                    maxItems: 1
+                    items:
+                      type: object
+                      required: [message]
+                      properties:
+                        index: {type: integer}
+                        message:
+                          type: object
+                          required: [role, content]
+                          properties:
+                            role: {const: assistant}
+                            content: {type: string}
+                        finish_reason: {type: [string, 'null']}
+                  usage:
+                    type: object
+                    description: Runtime-reported token counts when available.
+            text/event-stream:
+              schema: {type: string}
+        default:
+          $ref: '#/components/responses/Error'
+  /local/v1/runs/{run_id}/evidence:
+    get:
+      operationId: getEvidence
+      summary: Retrieve an opted-in run's metadata receipt
+      description: >-
+        Requires the same project's authorization. A run ID is not a capability.
+        No automatic polling. The receipt status is independent of inference
+        success. Embedded keys are not independent trust anchors.
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'}
+      responses:
+        '200':
+          description: Evidence state and available metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [receipt_status]
+                properties:
+                  receipt_status:
+                    type: string
+                    enum: [pending, ready, failed]
+                  manifest:
+                    type: object
+                    description: Gateway metadata assertion; no full-content binding claim.
+                  bundle:
+                    type: object
+                    description: Apostille Core 0.1 bundle; exact wire semantics come from the pinned Core dependency.
+                  manifest_base64:
+                    type: string
+                    contentEncoding: base64
+                    contentMediaType: application/json
+                    description: >-
+                      Present only when ready. Standard padded Base64 of the exact
+                      original manifest bytes. Decode for offline verification;
+                      reserializing the manifest object can change the bytes.
+                  bundle_base64:
+                    type: string
+                    contentEncoding: base64
+                    contentMediaType: application/json
+                    description: >-
+                      Present only when ready. Standard padded Base64 of the exact
+                      original Core 0.1 bundle bytes. Decode for offline verification.
+                      Embedded keys are not independently selected trust pins.
+        default:
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    ProjectToken:
+      type: http
+      scheme: bearer
+      description: High-entropy project token, provisioned through a restricted file by the operator.
+  responses:
+    Error:
+      description: >-
+        Sanitized error; never includes request content, backend error bodies or
+        credentials. Clients must not automatically retry.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                properties:
+                  code: {type: string}
+  schemas:
+    Message:
+      type: object
+      additionalProperties: false
+      required: [role, content]
+      properties:
+        role: {type: string, enum: [system, user, assistant]}
+        content: {type: string, minLength: 1}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [model, messages]
+      properties:
+        model: {type: string, minLength: 1}
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items: {$ref: '#/components/schemas/Message'}
+        stream: {type: boolean, default: false}
+        temperature: {type: number, minimum: 0, maximum: 2}
+        top_p: {type: number, exclusiveMinimum: 0, maximum: 1}
+        max_tokens: {type: integer, minimum: 1}
+        response_format:
+          type: object
+          additionalProperties: false
+          required: [type, json_schema]
+          properties:
+            type: {const: json_schema}
+            json_schema:
+              type: object
+              additionalProperties: false
+              required: [name, strict, schema]
+              properties:
+                name: {type: string, minLength: 1, maxLength: 96, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'}
+                strict: {const: true}
+                schema:
+                  type: object
+                  description: >-
+                    Schema must be a JSON object; declared root type can be an
+                    object, array or scalar. Bounded schema subset: type,
+                    required, enum, const, minimum, maximum, minLength,
+                    maxLength, minItems, maxItems, title, description,
+                    properties (schema children), items (schema),
+                    additionalProperties (boolean). Maximum depth 12 and
+                    256 schema nodes. References, regex, applicators and remote
+                    schema loading are rejected. This is not full JSON Schema.
+                  properties:
+                    type:
+                      oneOf:
+                        - {type: string}
+                        - {type: array, items: {type: string}}
+                  x-supported-keywords:
+                    - type
+                    - required
+                    - enum
+                    - const
+                    - minimum
+                    - maximum
+                    - minLength
+                    - maxLength
+                    - minItems
+                    - maxItems
+                    - title
+                    - description
+                    - properties
+                    - items
+                    - additionalProperties

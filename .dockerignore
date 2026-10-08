@@ -1,0 +1,12 @@
+**
+!go.mod
+!go.sum
+!internal/
+!internal/**
+!cmd/
+!cmd/apostille-local/
+!cmd/apostille-local/**
+!vendor/
+!vendor/**
+!deploy/
+!deploy/Dockerfile

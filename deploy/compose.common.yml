@@ -1,0 +1,101 @@
+# Common service definitions; invoke one vendor compose file, not this file.
+services:
+  gateway:
+    image: ${APOSTILLE_GATEWAY_IMAGE:?set a locally loaded immutable gateway image ID or digest}
+    pull_policy: never
+    command: ["--config", "/config/${APOSTILLE_CONFIG_FILE:-config.json}"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    stop_grace_period: 615s
+    pids_limit: 128
+    mem_limit: 512m
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m"]
+    ulimits:
+      core: {soft: 0, hard: 0}
+    environment:
+      GOMEMLIMIT: 384MiB
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+    dns: ["127.0.0.1"]
+    dns_opt: ["timeout:1", "attempts:1"]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+    volumes:
+      - type: bind
+        source: ${APOSTILLE_CONFIG_DIR:?set owner-managed config directory}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${APOSTILLE_TLS_DIR:?set local TLS directory}
+        target: /tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${APOSTILLE_EVIDENCE_DIR:?set empty or metadata-only evidence directory}
+        target: /evidence
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${APOSTILLE_SIGNING_DIR:?set signing directory; may be empty when disabled}
+        target: /signing
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - "${APOSTILLE_BIND_IP:-127.0.0.1}:${APOSTILLE_PORT:-8443}:8443"
+    networks: [ingress, inference]
+    logging: {driver: none}
+    restart: "no"
+  runtime:
+    image: ${APOSTILLE_RUNTIME_IMAGE:?set pinned runtime image using admin model-activate}
+    pull_policy: never
+    entrypoint: ["python3", "/deployment/runtime_launcher.py"]
+    command: ["/config/${APOSTILLE_CONFIG_FILE:-config.json}", "/opt/apostille/model"]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    pids_limit: 1024
+    shm_size: 8gb
+    tmpfs: ["/tmp:rw,nosuid,size=8g"]
+    ulimits:
+      core: {soft: 0, hard: 0}
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+      VLLM_LOGGING_LEVEL: CRITICAL
+      HOME: /tmp
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+    dns: ["127.0.0.1"]
+    dns_opt: ["timeout:1", "attempts:1"]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+    volumes:
+      - type: bind
+        source: ${APOSTILLE_CONFIG_DIR:?set config directory}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${APOSTILLE_MODEL_BUNDLE:?set verified model bundle using admin model-activate}
+        target: /opt/apostille/model
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./runtime_launcher.py
+        target: /deployment/runtime_launcher.py
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [inference]
+    logging: {driver: none}
+    restart: "no"

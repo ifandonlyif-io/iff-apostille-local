@@ -1,0 +1,25 @@
+# UNVERIFIED: qualify the exact GPU, driver, CUDA image and model combination.
+services:
+  gateway:
+    extends: {file: compose.common.yml, service: gateway}
+  runtime:
+    extends: {file: compose.common.yml, service: runtime}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${APOSTILLE_GPU_DEVICE:?set the single NVIDIA GPU UUID or index}"]
+              capabilities: [gpu]
+networks:
+  ingress:
+    enable_ipv6: false
+    driver_opts: {com.docker.network.bridge.name: apl-ingress}
+    ipam:
+      config: [{subnet: "${APOSTILLE_INGRESS_SUBNET:?choose unused dedicated IPv4 /24}"}]
+  inference:
+    internal: true
+    enable_ipv6: false
+    driver_opts: {com.docker.network.bridge.name: apl-inference}
+    ipam:
+      config: [{subnet: "${APOSTILLE_INFERENCE_SUBNET:?choose different unused IPv4 /24}"}]

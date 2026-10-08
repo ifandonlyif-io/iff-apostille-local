@@ -1,0 +1,342 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/ifandonlyif-io/iff-apostille-local/internal/config"
+	"github.com/ifandonlyif-io/iff-apostille-local/internal/evidence"
+	core "github.com/ifandonlyif-io/iff-apostille/apostille"
+)
+
+const Version = "0.1.0-alpha.1"
+const maxResponse = 2 << 20
+
+type Gateway struct {
+	c        config.Config
+	client   *http.Client
+	store    *evidence.Store
+	slots    chan struct{}
+	projects map[string]chan struct{}
+	draining atomic.Bool
+}
+
+func New(c config.Config, store *evidence.Store) (*Gateway, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	// Non-streaming runtimes may wait for generation before sending headers.
+	// Each operation supplies its own deadline (2s readiness, configured inference).
+	tr := &http.Transport{Proxy: nil, MaxIdleConns: 16, MaxIdleConnsPerHost: 8, DisableCompression: true}
+	g := &Gateway{c: c, store: store, client: &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect_forbidden") }}, slots: make(chan struct{}, c.Active().MaxConcurrent), projects: map[string]chan struct{}{}}
+	for _, p := range c.Projects {
+		g.projects[p.ID] = make(chan struct{}, p.MaxConcurrent)
+	}
+	return g, nil
+}
+func (g *Gateway) Drain() { g.draining.Store(true) }
+func (g *Gateway) Close() { g.client.CloseIdleConnections() }
+func jsonReply(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func fail(w http.ResponseWriter, status int, code string) {
+	jsonReply(w, status, map[string]any{"error": map[string]string{"code": code, "message": code, "type": "apostille_local_error"}})
+}
+func (g *Gateway) auth(r *http.Request) (config.Project, bool) {
+	raw := r.Header.Get("Authorization")
+	if len(raw) < 39 || len(raw) > 256 || !strings.HasPrefix(raw, "Bearer ") {
+		return config.Project{}, false
+	}
+	h := sha256.Sum256([]byte(strings.TrimPrefix(raw, "Bearer ")))
+	for _, p := range g.c.Projects {
+		want, _ := hex.DecodeString(p.APIKeySHA256)
+		if subtle.ConstantTimeCompare(h[:], want) == 1 {
+			return p, true
+		}
+	}
+	return config.Project{}, false
+}
+func permitted(p config.Project, id string) bool {
+	for _, s := range p.Models {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+func (g *Gateway) ready(ctx context.Context) bool {
+	if g.draining.Load() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(g.c.RuntimeURL, "/")+"/v1/models", nil)
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
+	if err != nil || len(b) > 65536 {
+		return false
+	}
+	var data struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(b, &data) != nil {
+		return false
+	}
+	for _, m := range data.Data {
+		if m.ID == g.c.ActiveModel {
+			return true
+		}
+	}
+	return false
+}
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.URL.RawQuery != "" {
+		fail(w, 400, "query_not_supported")
+		return
+	}
+	if r.URL.Path == "/healthz" && r.Method == "GET" {
+		jsonReply(w, 200, map[string]string{"status": "alive"})
+		return
+	}
+	if r.URL.Path == "/readyz" && r.Method == "GET" {
+		if !g.ready(r.Context()) {
+			fail(w, 503, "runtime_unavailable")
+			return
+		}
+		jsonReply(w, 200, map[string]string{"status": "ready"})
+		return
+	}
+	p, ok := g.auth(r)
+	if !ok {
+		fail(w, 401, "unauthorized")
+		return
+	}
+	switch {
+	case r.URL.Path == "/v1/models" && r.Method == "GET":
+		data := []any{}
+		if permitted(p, g.c.ActiveModel) && g.ready(r.Context()) {
+			data = append(data, map[string]string{"id": g.c.ActiveModel, "object": "model", "owned_by": "local"})
+		}
+		jsonReply(w, 200, map[string]any{"object": "list", "data": data})
+	case r.URL.Path == "/v1/chat/completions" && r.Method == "POST":
+		g.chat(w, r, p)
+	case strings.HasPrefix(r.URL.Path, "/local/v1/runs/") && strings.HasSuffix(r.URL.Path, "/evidence") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/local/v1/runs/"), "/evidence")
+		if !core.ValidID(id) || g.store == nil {
+			fail(w, 404, "not_found")
+			return
+		}
+		rec, err := g.store.Get(p.ID, id)
+		if err != nil {
+			if errors.Is(err, evidence.ErrNotFound) {
+				fail(w, 404, "not_found")
+			} else {
+				fail(w, 503, "evidence_unavailable")
+			}
+			return
+		}
+		if rec.Status == "ready" {
+			bundle, err := core.Canonical(rec.Bundle)
+			if err != nil {
+				fail(w, 503, "evidence_unavailable")
+				return
+			}
+			// JSON object re-serialization can change signed artifact bytes. Supply
+			// the original bytes for SDK export without another JCS implementation.
+			jsonReply(w, 200, map[string]any{
+				"receipt_status": rec.Status, "manifest": rec.Manifest, "bundle": rec.Bundle,
+				"manifest_base64": base64.StdEncoding.EncodeToString(rec.Manifest),
+				"bundle_base64":   base64.StdEncoding.EncodeToString(bundle),
+			})
+		} else {
+			jsonReply(w, 200, rec)
+		}
+	default:
+		fail(w, 404, "not_found")
+	}
+}
+func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project) {
+	// Bound writes as well as runtime reads, including clients that stop reading SSE.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(g.c.TimeoutSeconds+2) * time.Second))
+	if g.draining.Load() {
+		fail(w, 503, "draining")
+		return
+	}
+	if ct := strings.Split(r.Header.Get("Content-Type"), ";")[0]; ct != "application/json" {
+		fail(w, 415, "json_required")
+		return
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		fail(w, 413, "request_too_large")
+		return
+	}
+	model := g.c.Active()
+	request, compiled, err := parseRequest(raw, model)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	if !permitted(p, request.Model) {
+		fail(w, 403, "model_forbidden")
+		return
+	}
+	if request.Model != model.ID {
+		fail(w, 409, "model_inactive")
+		return
+	}
+	record := r.Header.Get("X-Apostille-Record")
+	if record != "" && record != "metadata" {
+		fail(w, 400, "invalid_record_mode")
+		return
+	}
+	if record != "" && g.store == nil {
+		fail(w, 503, "evidence_disabled")
+		return
+	}
+	select {
+	case g.slots <- struct{}{}:
+		defer func() { <-g.slots }()
+	default:
+		fail(w, 429, "capacity_exceeded")
+		return
+	}
+	select {
+	case g.projects[p.ID] <- struct{}{}:
+		defer func() { <-g.projects[p.ID] }()
+	default:
+		fail(w, 429, "project_capacity_exceeded")
+		return
+	}
+	if g.draining.Load() {
+		fail(w, 503, "draining")
+		return
+	}
+	id, err := core.NewID()
+	if err != nil {
+		fail(w, 503, "id_unavailable")
+		return
+	}
+	w.Header().Set("X-Apostille-Run-ID", id)
+	start := time.Now().UTC()
+	if record != "" {
+		if err = g.store.Begin(p.ID, id); err != nil {
+			fail(w, 503, "evidence_unavailable")
+			return
+		}
+	}
+	complete := false
+	defer func() {
+		if record != "" && !complete {
+			_ = g.store.Fail(p.ID, id)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.c.TimeoutSeconds)*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(request)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(g.c.RuntimeURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			fail(w, 504, "inference_timeout")
+		} else {
+			fail(w, 502, "runtime_unavailable")
+		}
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		fail(w, 502, "runtime_rejected")
+		return
+	}
+	finish := func(reason string) {
+		if record == "" {
+			complete = true
+			return
+		}
+		m := evidence.NewManifest(model)
+		m.RunID = id
+		m.GatewayVersion = Version
+		m.StartedAt = start.Format(time.RFC3339Nano)
+		m.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		m.FinishReason = reason
+		if g.store.Complete(p.ID, id, m) == nil {
+			complete = true
+		}
+	}
+	if request.Stream {
+		g.stream(w, r.WithContext(ctx), resp.Body, compiled, finish)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	if err != nil || len(data) > maxResponse {
+		fail(w, 502, "invalid_runtime_response")
+		return
+	}
+	content, reason, ok := checkCompletion(data, model.ID)
+	if !ok || !validateOutput(compiled, content) {
+		fail(w, 502, "invalid_runtime_response")
+		return
+	}
+	if ctx.Err() != nil {
+		fail(w, 504, "inference_timeout")
+		return
+	}
+	finish(reason)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, _ = w.Write(data)
+}
+func checkCompletion(data []byte, model string) (string, string, bool) {
+	var r struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role      string          `json:"role"`
+				Content   *string         `json:"content"`
+				ToolCalls json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+			Finish string `json:"finish_reason"`
+		} `json:"choices"`
+		Error json.RawMessage `json:"error"`
+	}
+	if validJSON(data) != nil || json.Unmarshal(data, &r) != nil || r.Error != nil || len(r.Choices) != 1 || r.Model != model {
+		return "", "", false
+	}
+	c := r.Choices[0]
+	if c.Index != 0 || c.Message.Content == nil || c.Message.Role != "assistant" || hasTools(c.Message.ToolCalls) || (c.Finish != "stop" && c.Finish != "length") {
+		return "", "", false
+	}
+	return *c.Message.Content, c.Finish, true
+}
+
+func hasTools(v json.RawMessage) bool {
+	return len(v) > 0 && string(v) != "null" && string(v) != "[]"
+}

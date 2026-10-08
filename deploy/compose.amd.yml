@@ -1,0 +1,26 @@
+# UNVERIFIED: qualify the exact gfx target, kernel, ROCm image and model.
+services:
+  gateway:
+    extends: {file: compose.common.yml, service: gateway}
+  runtime:
+    extends: {file: compose.common.yml, service: runtime}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - ${APOSTILLE_AMD_RENDER_DEVICE:?set selected /dev/dri/renderD device}:${APOSTILLE_AMD_RENDER_DEVICE:?set selected /dev/dri/renderD device}
+    group_add:
+      - "${APOSTILLE_RENDER_GID:?set render device group ID}"
+      - "${APOSTILLE_VIDEO_GID:?set kfd device group ID}"
+    environment:
+      ROCR_VISIBLE_DEVICES: "${APOSTILLE_GPU_DEVICE:?set the single AMD GPU UUID or index}"
+networks:
+  ingress:
+    enable_ipv6: false
+    driver_opts: {com.docker.network.bridge.name: apl-ingress}
+    ipam:
+      config: [{subnet: "${APOSTILLE_INGRESS_SUBNET:?choose unused dedicated IPv4 /24}"}]
+  inference:
+    internal: true
+    enable_ipv6: false
+    driver_opts: {com.docker.network.bridge.name: apl-inference}
+    ipam:
+      config: [{subnet: "${APOSTILLE_INFERENCE_SUBNET:?choose different unused IPv4 /24}"}]
