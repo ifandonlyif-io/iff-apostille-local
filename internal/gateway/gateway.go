@@ -140,9 +140,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/models" && r.Method == "GET":
 		data := []any{}
 		if permitted(p, g.c.ActiveModel) && g.ready(r.Context()) {
-			data = append(data, map[string]string{"id": g.c.ActiveModel, "object": "model", "owned_by": "local"})
+			data = append(data, map[string]any{"id": g.c.ActiveModel, "object": "model", "owned_by": "local", "created": 0})
 		}
 		jsonReply(w, 200, map[string]any{"object": "list", "data": data})
+	case r.URL.Path == "/local/v1/capabilities" && r.Method == "GET":
+		g.capabilities(w, r, p)
 	case r.URL.Path == "/v1/chat/completions" && r.Method == "POST":
 		g.chat(w, r, p)
 	case strings.HasPrefix(r.URL.Path, "/local/v1/runs/") && strings.HasSuffix(r.URL.Path, "/evidence") && r.Method == "GET":
@@ -291,7 +293,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 		}
 	}
 	if request.Stream {
-		g.stream(w, r.WithContext(ctx), resp.Body, compiled, finish)
+		g.stream(w, r.WithContext(ctx), resp.Body, request, compiled, finish, model.RuntimeProfile)
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
@@ -299,7 +301,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 		fail(w, 502, "invalid_runtime_response")
 		return
 	}
-	content, reason, ok := checkCompletion(data, model.ID)
+	data, content, reason, ok := checkCompletionForRuntime(data, request, model.RuntimeProfile)
 	if !ok || !validateOutput(compiled, content) {
 		fail(w, 502, "invalid_runtime_response")
 		return
@@ -313,7 +315,12 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 	w.WriteHeader(200)
 	_, _ = w.Write(data)
 }
-func checkCompletion(data []byte, model string) (string, string, bool) {
+func checkCompletion(data []byte, request Request) (string, string, bool) {
+	_, content, reason, ok := checkCompletionForRuntime(data, request, "")
+	return content, reason, ok
+}
+
+func checkCompletionForRuntime(data []byte, request Request, profile string) ([]byte, string, string, bool) {
 	var r struct {
 		Model   string `json:"model"`
 		Choices []struct {
@@ -326,17 +333,58 @@ func checkCompletion(data []byte, model string) (string, string, bool) {
 			Finish string `json:"finish_reason"`
 		} `json:"choices"`
 		Error json.RawMessage `json:"error"`
+		Usage json.RawMessage `json:"usage"`
 	}
-	if validJSON(data) != nil || json.Unmarshal(data, &r) != nil || r.Error != nil || len(r.Choices) != 1 || r.Model != model {
-		return "", "", false
+	if validJSON(data) != nil || !runtimeShape(data, false) || json.Unmarshal(data, &r) != nil || r.Error != nil || len(r.Choices) != 1 || r.Model != request.Model || !validUsage(r.Usage, false) {
+		return nil, "", "", false
 	}
 	c := r.Choices[0]
-	if c.Index != 0 || c.Message.Content == nil || c.Message.Role != "assistant" || hasTools(c.Message.ToolCalls) || (c.Finish != "stop" && c.Finish != "length") {
-		return "", "", false
+	var calls []ToolCall
+	if len(c.Message.ToolCalls) > 0 && !bytes.Equal(bytes.TrimSpace(c.Message.ToolCalls), []byte("null")) {
+		// Validate exact keys before decoding: encoding/json is case-insensitive,
+		// while the customer executes the original wire representation.
+		if !callsShape(c.Message.ToolCalls) || json.Unmarshal(c.Message.ToolCalls, &calls) != nil {
+			return nil, "", "", false
+		}
 	}
-	return *c.Message.Content, c.Finish, true
+	reason, ok := normalizeRuntimeFinish(profile, request, calls, c.Finish)
+	if c.Index != 0 || c.Message.Role != "assistant" || !ok || (c.Message.Content == nil && len(calls) == 0) {
+		return nil, "", "", false
+	}
+	if reason != c.Finish {
+		if data, ok = rewriteRuntimeFinish(data, reason); !ok {
+			return nil, "", "", false
+		}
+	}
+	content := ""
+	if c.Message.Content != nil {
+		content = *c.Message.Content
+	}
+	return data, content, reason, true
 }
 
-func hasTools(v json.RawMessage) bool {
-	return len(v) > 0 && string(v) != "null" && string(v) != "[]"
+func validFinish(request Request, calls []ToolCall, reason string) bool {
+	if !validateCalls(request, calls) {
+		return false
+	}
+	if len(calls) > 0 {
+		// A truncated call must never become an executable call or success receipt.
+		return reason == "tool_calls"
+	}
+	return reason == "stop" || reason == "length"
+}
+
+func validUsage(raw json.RawMessage, required bool) bool {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return !required
+	}
+	var u struct {
+		Prompt     *int64 `json:"prompt_tokens"`
+		Completion *int64 `json:"completion_tokens"`
+		Total      *int64 `json:"total_tokens"`
+	}
+	if json.Unmarshal(raw, &u) != nil || u.Prompt == nil || u.Completion == nil || u.Total == nil {
+		return false
+	}
+	return *u.Prompt >= 0 && *u.Prompt <= 1<<31 && *u.Completion >= 0 && *u.Completion <= 1<<31 && *u.Total == *u.Prompt+*u.Completion
 }

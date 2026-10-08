@@ -26,9 +26,12 @@ working configuration tooling while its deployment acceptance remains open.
 3. **Project authorization:** bearer tokens come from operator-named files;
    configuration stores token hashes and model/concurrency policy. Evidence
    requires the same project's authorization. Run IDs are not capabilities.
-4. **Narrow API:** text roles are system/user/assistant; one choice; only the
-   fields in OpenAPI are accepted. Structured output uses a bounded schema subset,
-   with references, regex/applicators and remote schema loading disabled.
+4. **Narrow API:** text roles are system/user/assistant and tool results; one
+   choice; only the fields in OpenAPI are accepted. Function-call messages allow
+   customer-owned frameworks to execute approved tools outside the gateway.
+   The active model's operator-approved parser gates tool calling. Structured
+   output and tool parameters use a bounded schema subset, with references,
+   regex/applicators and remote schema loading disabled.
 5. **Streaming:** validated chunk envelopes are forwarded as SSE. Deltas remain
    provisional until the final schema check and `[DONE]`. Cancellation propagates;
    clients must not treat a truncated stream as success or automatically retry.
@@ -51,14 +54,15 @@ Use a local checkout with Go available. Create an isolated Python environment:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ./sdk/python build packaging
+.venv/bin/python -m pip install -e ./sdk/python build packaging -r tests/requirements-framework.txt
 make PYTHON=.venv/bin/python check
 make fuzz
 make PYTHON=.venv/bin/python preview
 ```
 
-`make check` runs software checks and live SDK/gateway integration against a
-synthetic runtime. `make preview` builds a local bundle and never validates a GPU
+`make check` requires the Docker Compose v2 CLI and runs software checks and live
+SDK/gateway integration against a synthetic runtime. Its Compose checks do not
+require a daemon. `make preview` builds a local bundle and never validates a GPU
 or publishes it. See [deployment](../deploy/README.md) for the actual operator
 commands and model/runtime prerequisites; do not substitute invented image digests.
 
@@ -112,3 +116,70 @@ Select the initial hardware and supported model revision, obtain real runtime
 image digests/model artifacts, define the customer access and retention policy,
 provision TLS and external evidence pins, and schedule P4 acceptance. Do not mark
 the prototype customer-ready until those gates have evidence.
+
+## Customer framework interface update
+
+The [integration contract](INTEGRATIONS.md) documents the Chat Completions subset,
+project-scoped capability discovery, streaming usage and function-call exchange.
+Customers install and operate their own frameworks and tool sandboxes. No AMD or
+NVIDIA agent framework is a gateway dependency. The official OpenAI Python client
+is a pinned test/example dependency, separate from the Apostille Local SDK's
+runtime dependencies.
+
+Interface tests use synthetic model responses. They establish wire behavior,
+authorization and failure handling; they do not certify GAIA, NeMo, OpenShell,
+model tool quality, a vLLM image or any GPU. The original validation record above
+remains a record of the initial preview.
+
+This interface update was checked on 2026-10-08:
+
+- `make check`: Go tests, race detector, vet, host command builds, 37 Python SDK
+  tests, 9 deployment tests and TLS integration all passed.
+- TLS integration uses both the native SDK and official `openai==2.29.0` with
+  `httpx==0.28.1`. It covers capability/model isolation, sync/async text, usage
+  chunks, function-call roundtrips, cancellation and sanitized errors. Both
+  modes of the shipped OpenAI client example ran against the gateway.
+- Tool-call receipts passed offline verification; synthetic prompt, completion,
+  tool-result, function-name, argument and token markers were absent from stored
+  metadata and exported evidence.
+- Runtime field-alias and legacy-function rejection received additional gateway
+  race/vet and TLS integration checks after the full gate; all passed.
+- OpenAPI 3.1 validation, request/response schema cases, Markdown links and
+  `git diff --check` passed. Release bundles were not rebuilt or published by
+  this interface update; re-run `make preview` before distributing new artifacts.
+
+## vLLM profile and dual-vendor software gate — 2026-10-09
+
+The [runtime compatibility guide](RUNTIME_COMPATIBILITY.md) is the entry point
+for the upstream references, explicit profile and customer API acceptance command.
+
+- Added administrator-selected `runtime_profile: "vllm-chat-v1"`, pinned in the
+  asset manifest. Validated named-call `stop` endings normalize to `tool_calls`
+  for both ordinary responses and SSE; the empty profile preserves strict behavior.
+  Invalid arguments, incomplete streams and unsupported profiles still fail.
+- Added actual LangChain `ChatOpenAI` tests with `langchain-openai==1.1.11` and
+  `langchain-core==1.2.18`, alongside native SDK and `openai==2.29.0` tests.
+  Test dependencies remain separate from the SDK and its offline wheelhouse.
+- Added daemon-free `make compose-check` for AMD/NVIDIA templates, including
+  non-root/read-only execution, no gateway GPU/socket access, offline flags,
+  vendor device selection, private runtime networking and pinned image selection.
+  Both services explicitly target Linux amd64. Eight injected regressions per
+  vendor were detected; this did not start containers.
+- Added `tools/check_gateway.py`: project-authenticated TLS discovery, text,
+  streaming usage, schema output, named/required calls and a synthetic tool
+  roundtrip. It prints status-only JSON, executes no tools, stores no content
+  and always leaves hardware acceptance unverified. Both vendor declarations
+  were exercised against the synthetic TLS integration server.
+
+Final `make check` passed: all Go packages, race detector, vet, three host command
+builds, **37 SDK tests, 13 deployment tests, 17 acceptance-checker tests**, both
+Compose renders and native/OpenAI/LangChain TLS integration. Acceptance checks
+also remain active under optimized Python. OpenAPI 3.1, local Markdown links,
+Python test-environment dependency consistency and `git diff --check` passed.
+An independent review found no actionable regression in the profile/adapter
+and streamed-tool validation scope.
+
+No Docker service, actual vLLM image or GPU inference ran. P1 deployment and P4
+hardware acceptance remain open. No release bundle was rebuilt or published by
+this update. Obtain exact hardware/image/model pins and run the documented
+customer acceptance before making a hardware support commitment.

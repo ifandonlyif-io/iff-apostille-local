@@ -1,0 +1,5 @@
+# Test-only framework adapter, never an Apostille SDK runtime dependency.
+# These versions retain the same OpenAI client as the direct client suite.
+-r requirements-interop.txt
+langchain-openai==1.1.11
+langchain-core==1.2.18

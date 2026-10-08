@@ -9,14 +9,18 @@ From a clean, reviewed checkout:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ./sdk/python build packaging
+.venv/bin/python -m pip install -e ./sdk/python build packaging -r tests/requirements-framework.txt
 make PYTHON=.venv/bin/python check
 make fuzz
 make PYTHON=.venv/bin/python preview
 ```
 
-`make check` covers Go tests, race detection, vet, Python unittest, the real
-gateway/SDK integration test and host command builds. `make fuzz` exercises the
+`make check` covers Go tests, race detection, vet, Python unittest, both vendor
+Compose renders, API checker regressions, real TLS gateway integration with the
+native SDK, pinned OpenAI and LangChain clients, and host command builds. Install
+Docker Compose v2; no daemon is required for this configuration check. OpenAI and
+LangChain are test dependencies only; they are not included in the native SDK
+wheelhouse or its deployment SBOM. `make fuzz` exercises the
 gateway JSON parser. `make preview` builds Linux amd64 binaries, Python wheel/sdist
 and a local bundle under `dist/<VERSION>/`. It runs no Docker/GPU qualification
 and performs no registry publication or customer rollout.

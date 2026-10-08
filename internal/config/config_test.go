@@ -58,11 +58,13 @@ func TestModelProjectAndCredentialIsolation(t *testing.T) {
 			p.ID = "project-b"
 			c.Projects = append(c.Projects, p)
 		},
-		"unknown active model":  func(c *Config) { c.ActiveModel = "unknown" },
-		"unknown project model": func(c *Config) { c.Projects[0].Models = []string{"unknown"} },
-		"empty project models":  func(c *Config) { c.Projects[0].Models = nil },
-		"invalid project key":   func(c *Config) { c.Projects[0].APIKeySHA256 = "synthetic-token" },
-		"invalid project ID":    func(c *Config) { c.Projects[0].ID = "../project-a" },
+		"unknown active model":    func(c *Config) { c.ActiveModel = "unknown" },
+		"unknown project model":   func(c *Config) { c.Projects[0].Models = []string{"unknown"} },
+		"empty project models":    func(c *Config) { c.Projects[0].Models = nil },
+		"invalid project key":     func(c *Config) { c.Projects[0].APIKeySHA256 = "synthetic-token" },
+		"invalid project ID":      func(c *Config) { c.Projects[0].ID = "../project-a" },
+		"unknown tool parser":     func(c *Config) { c.Models[0].ToolCallParser = "custom_plugin.py" },
+		"unknown runtime profile": func(c *Config) { c.Models[0].RuntimeProfile = "arbitrary-backend" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := validConfig()
@@ -78,6 +80,26 @@ func TestModelProjectAndCredentialIsolation(t *testing.T) {
 	c.Projects = append(c.Projects, p)
 	if err := c.Validate(); err != nil {
 		t.Fatal("independent project rejected", err)
+	}
+}
+
+func TestToolParserIsExplicitAndBounded(t *testing.T) {
+	for _, parser := range []string{"", "hermes"} {
+		c := validConfig()
+		c.Models[0].ToolCallParser = parser
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRuntimeProfilesAreExplicit(t *testing.T) {
+	for _, profile := range []string{"", "vllm-chat-v1"} {
+		c := validConfig()
+		c.Models[0].RuntimeProfile = profile
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

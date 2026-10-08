@@ -109,7 +109,7 @@ func TestAuthorizationCatalogAndStrictRequests(t *testing.T) {
 		{"GET", "/v1/models", tokenB, "", 200},
 		{"POST", "/v1/chat/completions", tokenB, input(false), 403},
 		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), "qwen3-4b", "qwen3-8b", 1), 409},
-		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), `"stream":false`, `"n":1`, 1), 400},
+		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), `"stream":false`, `"n":2`, 1), 400},
 		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), `"max_tokens":32`, `"max_tokens":0`, 1), 400},
 		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), `"max_tokens":32`, `"max_tokens":null`, 1), 400},
 		{"POST", "/v1/chat/completions", tokenA, strings.Replace(input(false), `"model":`, `"Model":`, 1), 400},

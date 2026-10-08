@@ -30,6 +30,11 @@ different model/provider after a failure.
   enforce every runtime's retention behavior.
 - Resource limits constrain request size, schema shape and concurrency; they do
   not establish a GPU throughput or denial-of-service guarantee.
+- Function calls are untrusted model output. The gateway validates their wire
+  format and, for strict definitions, argument schema; the customer application
+  must independently authorize each action and constrain its tool sandbox.
+  No function is executed by the gateway. Customer frameworks, callbacks, tool
+  results, history and trace stores require their own content-retention controls.
 
 ## Signed metadata semantics
 
@@ -52,6 +57,13 @@ Offline verification must not fetch keys, schemas, current status or other
 evidence. Trusted attribution needs an independently provisioned exact key pin;
 the embedded key and any API-returned pin are not independent trust sources.
 Rotation and historical trust policy belong to the receiver.
+
+A `tool_calls` finish reason records completion of the model's generation step.
+It does not establish tool execution, tool authorization or completion of an
+agent workflow. Function names, arguments and results are not included in the
+metadata receipt. Use a verifier from the same reviewed release/source revision
+as the gateway; older preview verifiers that accept only `stop` and `length`
+reject these new metadata records. Apostille Core 0.1 signatures are unchanged.
 
 ## Abuse cases to exercise before a customer pilot
 

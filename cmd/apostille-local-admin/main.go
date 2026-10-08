@@ -50,6 +50,8 @@ const help = `Apostille Local administrator CLI (Linux deployment; local filesys
   assets prepare --source DIR --image-archive TAR --out DIR
     --id ID --revision COMMIT --license LICENSE --image REPO@sha256:DIGEST
     [--precision bfloat16] [--max-context 4096] [--max-tokens 512] [--max-concurrent 1]
+    [--tool-call-parser hermes]
+    [--runtime-profile vllm-chat-v1]
   assets verify --dir DIR --sha256 TRUSTED_HASH
   assets import --source DIR --out DIR --sha256 TRUSTED_HASH [--load-image]
   backup --config FILE --out DIR                  Configuration metadata only; excludes secrets/data
@@ -122,6 +124,8 @@ func run(ctx context.Context, args []string) error {
 		maxContext := f.Int("max-context", 4096, "context cap")
 		maxTokens := f.Int("max-tokens", 512, "output cap")
 		maxConcurrent := f.Int("max-concurrent", 1, "concurrency cap")
+		toolParser := f.String("tool-call-parser", "", "explicit tool parser: hermes (default disables tools)")
+		runtimeProfile := f.String("runtime-profile", "", "explicit wire adapter: vllm-chat-v1 (default strict)")
 		loadImage := f.Bool("load-image", false, "explicitly load local image archive into Docker")
 		if e := f.Parse(args[2:]); e != nil {
 			return e
@@ -131,7 +135,7 @@ func run(ctx context.Context, args []string) error {
 			if e := require(*source, *out, *imageArchive, *id, *revision, *license, *image); e != nil {
 				return e
 			}
-			m := config.Model{ID: *id, Revision: *revision, License: *license, RuntimeImage: *image, Precision: *precision, MaxContext: *maxContext, MaxTokens: *maxTokens, MaxConcurrent: *maxConcurrent}
+			m := config.Model{ID: *id, Revision: *revision, License: *license, RuntimeImage: *image, Precision: *precision, MaxContext: *maxContext, MaxTokens: *maxTokens, MaxConcurrent: *maxConcurrent, ToolCallParser: *toolParser, RuntimeProfile: *runtimeProfile}
 			imageID, e := admin.ResolveImageID(ctx, admin.OSExecutor{}, *image)
 			if e != nil {
 				return e

@@ -1,6 +1,7 @@
 # Common service definitions; invoke one vendor compose file, not this file.
 services:
   gateway:
+    platform: linux/amd64
     image: ${APOSTILLE_GATEWAY_IMAGE:?set a locally loaded immutable gateway image ID or digest}
     pull_policy: never
     command: ["--config", "/config/${APOSTILLE_CONFIG_FILE:-config.json}"]
@@ -50,6 +51,7 @@ services:
     logging: {driver: none}
     restart: "no"
   runtime:
+    platform: linux/amd64
     image: ${APOSTILLE_RUNTIME_IMAGE:?set pinned runtime image using admin model-activate}
     pull_policy: never
     entrypoint: ["python3", "/deployment/runtime_launcher.py"]

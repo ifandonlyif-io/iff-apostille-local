@@ -38,6 +38,12 @@ release with `--no-enable-log-requests`, `--no-enable-log-outputs` and
 `--default-chat-template-kwargs` support. Its default disables Qwen thinking.
 Unsupported flags fail startup; they are never dropped automatically.
 
+Optional client-executed function calling additionally requires the pinned
+runtime's `--enable-auto-tool-choice --tool-call-parser hermes` support and a
+matching model chat template. These flags parse model output; they do not run
+tools. Qualify tool selection, JSON arguments, streamed fragments and cancellation
+on the actual model/image before enabling the feature for customers.
+
 References: [vLLM GPU requirements](https://docs.vllm.ai/en/stable/getting_started/installation/gpu/),
 [vLLM serving options](https://docs.vllm.ai/en/latest/cli/serve/),
 [Docker GPU reservations](https://docs.docker.com/compose/how-tos/gpu-support/),
@@ -66,9 +72,29 @@ docker image save --output runtime.tar "$RUNTIME_IMAGE"
 apostille-local-admin assets prepare \
   --source "$MODEL_SNAPSHOT" --image-archive runtime.tar --out offline-bundle \
   --id "$MODEL_ID" --revision "$MODEL_REVISION" --license "$MODEL_LICENSE" \
-  --image "$RUNTIME_IMAGE" --precision bfloat16 \
+  --image "$RUNTIME_IMAGE" --runtime-profile vllm-chat-v1 --precision bfloat16 \
   --max-context 4096 --max-tokens 512 --max-concurrent 1
 ```
+
+Function calling is disabled by default. To prepare an approved tool-capable
+model, append `--tool-call-parser hermes` to `assets prepare`. The CLI includes
+`tool_call_parser` in the model metadata and the launcher derives its parser
+flags from that pinned metadata. No arbitrary parser or plugin path is accepted.
+Changing the parser requires preparing a **new bundle**, reviewing its new
+`manifest_sha256`, importing it and updating the catalog entry before activation.
+Editing only the config field fails manifest verification. Existing bundles
+without this field retain text/structured-output behavior and do not acquire
+tool calling automatically. See [customer integration](../docs/INTEGRATIONS.md)
+for the separate client-side tool execution boundary.
+
+The explicit `--runtime-profile vllm-chat-v1` selects the narrowly scoped vLLM
+wire adapter. It normalizes a fully validated named function call's terminal
+`stop` to `tool_calls`, including streams. Omission keeps the strict unadapted
+contract. This profile is also pinned in the bundle: changing it requires a new
+bundle and catalog pin. It neither selects an image version nor enables tools.
+The NVIDIA CUDA and AMD ROCm images need separate reviewed digests and matching
+bundles. See [runtime compatibility](../docs/RUNTIME_COMPATIBILITY.md) for the
+source evidence and acceptance limits.
 
 `RUNTIME_IMAGE` must be a reviewed `repository@sha256:digest`, already available
 in the staging Docker daemon. Preparation resolves that reference to its
@@ -226,9 +252,16 @@ literal entries matching the supplied config file.
 
 ## 4. Actual offline and no-egress acceptance
 
+Run the [synthetic API checker](../docs/RUNTIME_COMPATIBILITY.md#check-an-installed-gateway)
+against the deployed TLS gateway for either vendor. It tests the same public
+contract and prints status-only JSON. Its `requested_vendor` is an operator
+label; a passing report cannot identify or qualify the physical GPU.
+
 Before customer traffic, run a synthetic request on the exact hardware and
 record warmup, peak memory, context/concurrency limits, timeout/cancel behavior,
 text/JSON-schema/streaming behavior, switch/rollback and cold restart results.
+For an enabled tool parser, also exercise complete client-side tool roundtrips,
+strict schema rejection, streamed arguments and cancellation before tool execution.
 Repeat with external connectivity physically/firewall blocked. A missing model,
 tokenizer, runtime image or compile-time asset must cause failure, never a fetch
 or cloud fallback. Runtime writable caches are tmpfs; qualify a cold start with

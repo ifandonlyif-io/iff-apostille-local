@@ -12,6 +12,7 @@
       "manifest_sha256": "REPLACE_WITH_TRUSTED_BUNDLE_MANIFEST_SHA256",
       "license": "REPLACE_WITH_REVIEWED_MODEL_LICENSE",
       "runtime_image": "REPLACE_WITH_QUALIFIED_VLLM_REPOSITORY@sha256:REPLACE_WITH_REAL_IMAGE_DIGEST",
+      "runtime_profile": "vllm-chat-v1",
       "precision": "bfloat16",
       "max_context": 4096,
       "max_tokens": 512,

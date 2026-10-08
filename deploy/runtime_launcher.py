@@ -50,6 +50,10 @@ def validate(config_path, bundle):
         fail("image_digest_required")
     if model["precision"] not in ("float16", "bfloat16"):
         fail("unsupported_precision")
+    if model.get("tool_call_parser", "") not in ("", "hermes"):
+        fail("unsupported_tool_call_parser")
+    if model.get("runtime_profile", "") not in ("", "vllm-chat-v1"):
+        fail("unsupported_runtime_profile")
     for key, lower, upper in (("max_context", 128, 131072), ("max_tokens", 1, 131071), ("max_concurrent", 1, 32)):
         if type(model[key]) is not int or not lower <= model[key] <= upper:
             fail("invalid_model_limits")
@@ -108,7 +112,9 @@ def validate(config_path, bundle):
 
 
 def command(model, bundle):
-    return [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+    if model.get("runtime_profile", "") not in ("", "vllm-chat-v1"):
+        fail("unsupported_runtime_profile")
+    args = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", str(Path(bundle) / "model"), "--tokenizer", str(Path(bundle) / "model"),
             "--served-model-name", model["id"], "--host", "0.0.0.0", "--port", "8000",
             "--load-format", "safetensors", "--dtype", model["precision"],
@@ -116,6 +122,12 @@ def command(model, bundle):
             "--default-chat-template-kwargs", '{"enable_thinking":false}',
             "--no-enable-log-requests", "--no-enable-log-outputs", "--disable-log-stats",
             "--disable-uvicorn-access-log"]
+    parser = model.get("tool_call_parser", "")
+    if parser not in ("", "hermes"):
+        fail("unsupported_tool_call_parser")
+    if parser:
+        args += ["--enable-auto-tool-choice", "--tool-call-parser", parser]
+    return args
 
 
 def main():

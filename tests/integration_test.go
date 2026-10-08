@@ -50,20 +50,56 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 		if request.ResponseFormat != nil {
 			content = `{"answer":42}`
 		}
+		tool := len(request.Tools) != 0 && string(request.ToolChoice) != `"none"`
+		for _, message := range request.Messages {
+			if message.Role == "tool" {
+				tool = false
+			}
+		}
+		finish := "stop"
+		if tool {
+			finish = "tool_calls"
+			// vLLM's named function path can use stop even though a tool call
+			// completed. Exercise the explicit runtime profile adapter rather
+			// than teaching clients to accept this backend-specific detail.
+			if strings.HasPrefix(string(request.ToolChoice), "{") {
+				finish = "stop"
+			}
+		}
+		usage := map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+		encodeEvent := func(delta any, reason any) {
+			b, _ := json.Marshal(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion.chunk", "created": 1, "model": "qwen3-4b", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": reason}}})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+		}
 		if request.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			b, _ := json.Marshal(map[string]any{"model": "qwen3-4b", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": content}, "finish_reason": nil}}})
+			b, _ := json.Marshal(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion.chunk", "created": 1, "model": "qwen3-4b", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": content}, "finish_reason": nil}}})
 			// Exercise a valid multiline SSE JSON event through the real SDK.
-			fmt.Fprintf(w, "data: %s\n\n", strings.Replace(string(b), `,"model":`, ",\ndata: \"model\":", 1))
+			if tool {
+				encodeEvent(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call_demo", "type": "function", "function": map[string]string{"name": "lookup_demo", "arguments": `{"code":`}}}}, nil)
+				encodeEvent(map[string]any{"tool_calls": []any{map[string]any{"index": 0, "function": map[string]string{"arguments": `"TEST-001"}`}}}}, nil)
+			} else {
+				fmt.Fprintf(w, "data: %s\n\n", strings.Replace(string(b), `,"model":`, ",\ndata: \"model\":", 1))
+			}
 			w.(http.Flusher).Flush()
 			if request.Messages[0].Content == "cancel" {
 				<-r.Context().Done()
 				return
 			}
-			fmt.Fprint(w, "data: {\"model\":\"qwen3-4b\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+			encodeEvent(map[string]any{}, finish)
+			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage {
+				b, _ := json.Marshal(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion.chunk", "created": 1, "model": "qwen3-4b", "choices": []any{}, "usage": usage})
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+			fmt.Fprint(w, "data: [DONE]\n\n")
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"model": "qwen3-4b", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": content}, "finish_reason": "stop"}}})
+		message := map[string]any{"role": "assistant", "content": content}
+		if tool {
+			message["content"] = nil
+			message["tool_calls"] = []any{map[string]any{"id": "call_demo", "type": "function", "function": map[string]string{"name": "lookup_demo", "arguments": `{"code":"TEST-001"}`}}}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion", "created": 1, "model": "qwen3-4b", "usage": usage, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}})
 	}))
 	defer backend.Close()
 	key := filepath.Join(dir, "seed")
@@ -84,6 +120,8 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 	}
 	defer store.Close()
 	model := config.Model{ID: "qwen3-4b", Revision: strings.Repeat("a", 40), ManifestSHA256: strings.Repeat("b", 64), RuntimeImage: "vllm/vllm-openai@sha256:" + strings.Repeat("c", 64), License: "Apache-2.0", Precision: "float16", MaxContext: 4096, MaxTokens: 128, MaxConcurrent: 2, Path: "/synthetic"}
+	model.ToolCallParser = "hermes"
+	model.RuntimeProfile = "vllm-chat-v1"
 	other := model
 	other.ID = "qwen3-8b"
 	cfg := config.Config{Version: 1, Listen: "127.0.0.1:0", RuntimeURL: backend.URL, Models: []config.Model{model, other}, ActiveModel: model.ID, TimeoutSeconds: 10}
@@ -124,6 +162,74 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 		t.Fatalf("SDK integration: %v\n%s", err, output)
 	}
 	t.Log(string(output))
+	interop := exec.Command(python, "openai_live.py", server.URL, ca, paths[0], paths[1])
+	if output, err := interop.CombinedOutput(); err != nil {
+		t.Fatalf("official OpenAI SDK integration: %v\n%s", err, output)
+	} else {
+		t.Log(string(output))
+	}
+	frameworkPython := os.Getenv("APOSTILLE_FRAMEWORK_PYTHON")
+	if frameworkPython == "" {
+		frameworkPython = python
+	}
+	framework := exec.Command(frameworkPython, "langchain_live.py", server.URL, ca, paths[0], paths[1])
+	if output, err := framework.CombinedOutput(); err != nil {
+		t.Fatalf("LangChain client integration: %v\n%s", err, output)
+	} else {
+		t.Log(string(output))
+	}
+	for _, vendor := range []string{"amd", "nvidia"} {
+		t.Run("acceptance_cli_"+vendor, func(t *testing.T) {
+			// Both operator declarations exercise the same hardware-independent
+			// API contract. The mock cannot observe or qualify a real GPU.
+			check := exec.Command(python, "../tools/check_gateway.py",
+				"--base-url", server.URL, "--token-file", paths[0], "--ca-file", ca,
+				"--model", model.ID, "--vendor", vendor, "--require-tools")
+			check.Env = append(os.Environ(), "PYTHONPATH=../sdk/python/src")
+			var stderr bytes.Buffer
+			check.Stderr = &stderr
+			output, err := check.Output()
+			if err != nil {
+				t.Fatalf("acceptance CLI failed: %v", err)
+			}
+			if stderr.Len() != 0 {
+				t.Fatal("acceptance CLI emitted diagnostics")
+			}
+			for _, marker := range []string{"SYNTHETIC_PRIVATE", "lookup_demo", "TEST-001",
+				"synthetic-project-token", "Reply with a short synthetic greeting",
+				"Return a JSON object with answer equal to 42"} {
+				if bytes.Contains(output, []byte(marker)) {
+					t.Fatal("acceptance report contains test content or credentials")
+				}
+			}
+			var report struct {
+				Schema             string            `json:"schema"`
+				Result             string            `json:"result"`
+				RequestedVendor    string            `json:"requested_vendor"`
+				HardwareAcceptance string            `json:"hardware_acceptance"`
+				GPUIdentity        string            `json:"gpu_identity"`
+				Checks             map[string]string `json:"checks"`
+			}
+			if err := json.Unmarshal(output, &report); err != nil {
+				t.Fatal("acceptance report is not a JSON object")
+			}
+			if report.Schema != "apostille-local-api-check/1" || report.Result != "passed" ||
+				report.RequestedVendor != vendor || report.HardwareAcceptance != "unverified" ||
+				report.GPUIdentity != "not_observed" {
+				t.Fatal("acceptance report violated the API-only result contract")
+			}
+			names := []string{"discovery", "text", "stream_usage", "json_schema",
+				"named_tool", "required_tool", "tool_roundtrip", "named_tool_stream"}
+			if len(report.Checks) != len(names) {
+				t.Fatal("acceptance report omitted or added checks")
+			}
+			for _, name := range names {
+				if report.Checks[name] != "passed" {
+					t.Fatalf("acceptance check %s did not pass", name)
+				}
+			}
+		})
+	}
 	scanPrivate := func(path string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -135,7 +241,7 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		for _, marker := range []string{"SYNTHETIC_PRIVATE_INPUT", "SYNTHETIC_PRIVATE_OUTPUT", "synthetic-project-token"} {
+		for _, marker := range []string{"SYNTHETIC_PRIVATE_INPUT", "SYNTHETIC_PRIVATE_OUTPUT", "SYNTHETIC_PRIVATE_TOOL_RESULT", "lookup_demo", "TEST-001", "synthetic-project-token"} {
 			if bytes.Contains(b, []byte(marker)) {
 				return fmt.Errorf("private test marker persisted")
 			}

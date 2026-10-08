@@ -475,7 +475,7 @@ func (s *Store) recoverPending() error {
 
 func validateManifest(m Manifest) error {
 	model := m.ConfiguredModel
-	if m.Schema != Schema || m.EvidenceScope != Scope || !core.ValidID(m.RunID) || m.Status != "completed" || (m.FinishReason != "stop" && m.FinishReason != "length") || !config.ValidID(m.GatewayVersion) || !config.ValidID(model.ID) || !revisionPattern.MatchString(model.Revision) || !hexPattern.MatchString(model.ManifestSHA256) || !config.ValidRuntimeImage(model.RuntimeImage) || (model.Precision != "float16" && model.Precision != "bfloat16") {
+	if m.Schema != Schema || m.EvidenceScope != Scope || !core.ValidID(m.RunID) || m.Status != "completed" || (m.FinishReason != "stop" && m.FinishReason != "length" && m.FinishReason != "tool_calls") || !config.ValidID(m.GatewayVersion) || !config.ValidID(model.ID) || !revisionPattern.MatchString(model.Revision) || !hexPattern.MatchString(model.ManifestSHA256) || !config.ValidRuntimeImage(model.RuntimeImage) || (model.Precision != "float16" && model.Precision != "bfloat16") {
 		return ErrInvalid
 	}
 	start, err := time.Parse(time.RFC3339Nano, m.StartedAt)

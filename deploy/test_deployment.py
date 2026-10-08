@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 import io
+import subprocess
 from unittest.mock import patch
 
 
@@ -19,10 +20,11 @@ def module(path, name):
 launcher = module(Path(__file__).with_name("runtime_launcher.py"), "launcher")
 policy = module(Path(__file__).parent.parent / "scripts/egress_policy.py", "policy")
 probe = module(Path(__file__).parent.parent / "scripts/egress_probe.py", "probe")
+compose = module(Path(__file__).parent.parent / "scripts/validate_compose.py", "compose")
 
 
 class RuntimeBoundaryTests(unittest.TestCase):
-    def fixture(self, root):
+    def fixture(self, root, tool_parser=None, runtime_profile=None):
         root = Path(root)
         bundle = root / "bundle"
         (bundle / "model").mkdir(parents=True)
@@ -31,6 +33,10 @@ class RuntimeBoundaryTests(unittest.TestCase):
                      runtime_image="registry.invalid/runtime@sha256:" + "b" * 64, precision="bfloat16",
                      max_context=4096, max_tokens=32, max_concurrent=1, path="")
         entries = []
+        if tool_parser is not None:
+            model["tool_call_parser"] = tool_parser
+        if runtime_profile is not None:
+            model["runtime_profile"] = runtime_profile
         for name, raw in (("model/config.json", b'{}'), ("model/test.safetensors", b'synthetic-not-real-weights'),
                           ("model/LICENSE", b'synthetic-attribution'), ("model/README.md", b'synthetic-model-card'),
                           ("image/runtime.tar", b'synthetic-not-real-image')):
@@ -57,6 +63,44 @@ class RuntimeBoundaryTests(unittest.TestCase):
             self.assertIn("--no-enable-log-outputs", args)
             self.assertEqual(json.loads(args[args.index("--default-chat-template-kwargs") + 1]), {"enable_thinking": False})
             self.assertEqual(args[args.index("--model") + 1], str(bundle / "model"))
+            self.assertNotIn("--enable-auto-tool-choice", args)
+
+    def test_tool_parser_must_be_explicit_pinned_and_allowlisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, bundle, _ = self.fixture(tmp, "hermes")
+            args = launcher.command(launcher.validate(config, bundle), bundle)
+            self.assertIn("--enable-auto-tool-choice", args)
+            self.assertEqual(args[args.index("--tool-call-parser") + 1], "hermes")
+            # Config-only changes cannot enable tools on an older pinned bundle.
+            data = json.loads(config.read_text())
+            data["models"][0].pop("tool_call_parser")
+            config.write_text(json.dumps(data))
+            with self.assertRaisesRegex(ValueError, "model_metadata_mismatch"):
+                launcher.validate(config, bundle)
+        with tempfile.TemporaryDirectory() as tmp:
+            config, bundle, model = self.fixture(tmp, "plugin.py")
+            with self.assertRaisesRegex(ValueError, "unsupported_tool_call_parser"):
+                launcher.validate(config, bundle)
+            with self.assertRaisesRegex(ValueError, "unsupported_tool_call_parser"):
+                launcher.command(model, bundle)
+
+    def test_runtime_profile_is_allowlisted_and_pinned_with_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, bundle, _ = self.fixture(tmp, runtime_profile="vllm-chat-v1")
+            model = launcher.validate(config, bundle)
+            self.assertIn("vllm.entrypoints.openai.api_server", launcher.command(model, bundle))
+            changed = json.loads(config.read_text())
+            changed["models"][0].pop("runtime_profile")
+            config.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "model_metadata_mismatch"):
+                launcher.validate(config, bundle)
+        for profile in ("other-runtime", "vllm-chat-v2", "http://external.invalid"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
+                config, bundle, model = self.fixture(tmp, runtime_profile=profile)
+                with self.assertRaisesRegex(ValueError, "unsupported_runtime_profile"):
+                    launcher.validate(config, bundle)
+                with self.assertRaisesRegex(ValueError, "unsupported_runtime_profile"):
+                    launcher.command(model, bundle)
 
     def test_rejects_tamper_links_and_unmanifested_files(self):
         for mutation in ("tamper", "symlink", "pickle"):
@@ -100,6 +144,33 @@ class FirewallScopeTests(unittest.TestCase):
                                    ("8.8.8.0/24", "172.29.81.0/24"), ("127.0.0.0/24", "172.29.81.0/24")):
             with self.subTest(ingress=ingress), self.assertRaises(ValueError):
                 policy.commands(ingress, inference)
+
+
+class ComposeSoftwareCheckTests(unittest.TestCase):
+    def test_renderer_uses_only_config_with_synthetic_environment(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(compose.os.environ, {"APOSTILLE_CONFIG_FILE": "secret.json", "COMPOSE_FILE": "host.yml"}), \
+                patch.object(compose.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b'{"services": {}}')) as run:
+            self.assertEqual(compose.render("amd", tmp), {"services": {}})
+            args = run.call_args.args[0]
+            self.assertEqual(args[-3:], ["config", "--format", "json"])
+            self.assertNotIn("up", args)
+            self.assertNotIn("run", args)
+            env = run.call_args.kwargs["env"]
+            self.assertNotIn("COMPOSE_FILE", env)
+            self.assertNotIn("APOSTILLE_CONFIG_FILE", env)
+            self.assertTrue(env["APOSTILLE_CONFIG_DIR"].startswith(tmp))
+
+    def test_missing_cli_fails_without_reporting_pass(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(compose.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(ValueError, "docker_compose_cli_required"):
+                compose.render("nvidia", tmp)
+
+    def test_render_failure_does_not_echo_environment_or_cli_output(self):
+        failed = subprocess.CompletedProcess([], 1, b"SYNTHETIC_PRIVATE_VALUE", b"SYNTHETIC_PRIVATE_VALUE")
+        with tempfile.TemporaryDirectory() as tmp, patch.object(compose.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(ValueError, "^compose_render_failed$"):
+                compose.render("nvidia", tmp)
 
 
 class EgressProbeTests(unittest.TestCase):

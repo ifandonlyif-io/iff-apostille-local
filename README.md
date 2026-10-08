@@ -16,6 +16,7 @@ Apostille Core 0.1. It is not a validated pharmaceutical system.
 | Streaming | SSE chunks and `[DONE]`; disconnect cancels gateway/backend work |
 | Selection | Project-authorized active model; one active model per runtime deployment |
 | Structured output | Strict schema with a bounded keyword subset |
+| Customer integrations | OpenAI Chat Completions subset, project-scoped capability discovery, client-executed function calls |
 | Evidence | Opt in using `X-Apostille-Record: metadata`; authenticated retrieval and exact-byte download by run ID |
 | SDK | Python 3.11+, sync/async, streaming context managers, token-file authentication |
 | Deployment | Operator-supplied pinned runtime image and pre-staged model artifacts |
@@ -32,6 +33,10 @@ receivers need independently supplied exact key pins for trust.
    files, exact image digest, project key hash, TLS material and signing key.
 3. Use the [Python SDK guide](sdk/python/README.md) or the
    [OpenAPI specification](api/openapi.yaml).
+   For a customer-owned framework, start with the [integration contract and
+   official OpenAI SDK example](docs/INTEGRATIONS.md).
+   Use the [runtime compatibility and API acceptance guide](docs/RUNTIME_COMPATIBILITY.md)
+   for the shared AMD/NVIDIA validation commands.
 4. Complete [hardware acceptance](docs/SUPPORT_MATRIX.md) before offering a
    hardware or latency commitment.
 5. Follow [administrator operations](docs/OPERATIONS.md) and
@@ -41,17 +46,20 @@ The repository requires Go 1.25+ (toolchain pinned by `go.mod`). For SDK work:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ./sdk/python
+.venv/bin/python -m pip install -e ./sdk/python -r tests/requirements-framework.txt
 make PYTHON=.venv/bin/python check
 ```
 
-`make check` runs Go tests, race detection, vet, SDK tests, the real gateway/SDK
-integration suite and command builds. Tests use synthetic data; the integration
-runtime is a test server, not a GPU model. Individual checks are also available:
+`make check` runs Go tests, race detection, vet, SDK tests, deployment and API
+checker tests, both vendor Compose renders, real gateway integration with the
+native SDK, pinned OpenAI and LangChain clients, and command builds. Docker
+Compose v2 must be installed; its configuration check needs no running daemon.
+Tests use synthetic data and a test runtime server. Individual checks are available:
 
 ```sh
 make test race vet
 make PYTHON=.venv/bin/python sdk-test integration
+make PYTHON=.venv/bin/python deployment-test compose-check acceptance-test
 make fuzz
 ```
 

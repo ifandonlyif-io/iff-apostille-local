@@ -1,9 +1,9 @@
 PYTHON ?= python3
 VERSION ?= 0.1.0-alpha.1
 export GOWORK := off
-.PHONY: check test race vet build sdk-test deployment-test integration fuzz security preview clean
+.PHONY: check test race vet build sdk-test deployment-test compose-check acceptance-test integration fuzz security preview clean
 
-check: test race vet sdk-test deployment-test integration build
+check: test race vet sdk-test deployment-test compose-check acceptance-test integration build
 
 test:
 	go test ./...
@@ -28,6 +28,13 @@ integration:
 
 deployment-test:
 	$(PYTHON) -m unittest discover -s deploy -p 'test_*.py' -v
+
+# Only renders configuration; no Docker daemon, images or GPU are needed.
+compose-check:
+	$(PYTHON) scripts/validate_compose.py
+
+acceptance-test:
+	PYTHONPATH=sdk/python/src $(PYTHON) -m unittest discover -s tools -p 'test_*.py' -v
 
 fuzz:
 	go test ./internal/gateway -run='^$$' -fuzz=FuzzStrictJSON -fuzztime=30s
