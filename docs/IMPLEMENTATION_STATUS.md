@@ -325,6 +325,14 @@ stream never leaves it `pending`. Auth accepts the project token from exactly on
 an additive `compatible_apis` entry. Scope, mapping and the unsupported list are
 in [integrations](INTEGRATIONS.md).
 
+The native SDK uses one SSE parsing loop and reuses its event-size counter
+for the tail after `[DONE]`. Only CR/LF bytes are allowed until HTTP EOF;
+the tail limit counts raw bytes (CRLF consumes two), excluding an LF that
+completes the terminal event's CR delimiter. Rejected tails clear the parser's
+completion flag. Sync/async tests cover LF, CRLF and standalone CR split across
+transport blocks, a CR delimiter followed by LF, and data/usage events coalesced
+with `[DONE]` and its tail. Stream fixtures are shared with the client tests.
+
 Validation record (Go 1.26.9 toolchain as installed; Python 3.11.9 virtualenv
 outside the repository with `anthropic==1.8.0`, `openai==2.29.0`):
 
@@ -332,12 +340,17 @@ outside the repository with `anthropic==1.8.0`, `openai==2.29.0`):
   `go test -race ./...` passed with the pre-existing gateway tests unmodified.
 - `go test ./internal/gateway -run='^$' -fuzz=FuzzMessagesRequest -fuzztime=30s`
   passed (accepted inputs round-trip through `parseRequest`).
-- `make PYTHON=<venv>/bin/python sdk-test integration acceptance-test`: 63 SDK
-  tests, the TLS integration suite (native SDK, OpenAI SDK, the new
+- SDK suite: 73 tests passed, including 464 tail-boundary subcases. The TLS
+  integration suite (native SDK, OpenAI SDK, the new
   `tests/anthropic_live.py` with the official Anthropic SDK, LangChain, and the
   acceptance CLI for both vendors) and 23 acceptance-tool tests passed.
 - `make workflow-test deployment-test compose-check build` passed (13 and 15
   tests), and `make security` (govulncheck v1.1.4) reported no vulnerabilities.
+- After the SSE cleanup, the SDK suite, TLS integration, 13 live workflow
+  tests, Go tests/race/vet and `git diff --check` passed again. `sdk-test` uses
+  a synthetic signer for `tests/test_workflow.py`; it does not require
+  `APOSTILLE_WORKFLOW_BIN`. `workflow-test` builds and sets that variable for
+  the separate `workflow_tests/test_live.py` suite.
 - `examples/anthropic_client.py` imports with only `anthropic==1.8.0` and its
   dependencies installed (no `httpx`).
 

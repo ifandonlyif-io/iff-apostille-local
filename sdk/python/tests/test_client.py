@@ -2,15 +2,15 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 
 import httpx
 import certifi
 
-from apostille_local import APIError, AsyncClient, Client, ConfigurationError
+from apostille_local import APIError, Client, ConfigurationError
 from apostille_local.client import _SSE
+from client_test_helpers import AsyncBody, Fixture, SyncBody
 
 MESSAGES = [{"role": "user", "content": "synthetic test"}]
 CHUNK = b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\n'
@@ -45,55 +45,6 @@ def ready_evidence():
             "bundle": {"synthetic_bundle": "object is not exported"},
             "manifest_base64": base64.b64encode(MANIFEST).decode(),
             "bundle_base64": base64.b64encode(BUNDLE).decode()}
-
-
-class SyncBody(httpx.SyncByteStream):
-    def __init__(self, blocks):
-        self.blocks = blocks
-        self.closed = False
-        self.reads = 0
-
-    def __iter__(self):
-        for block in self.blocks:
-            self.reads += 1
-            yield block
-
-    def close(self):
-        self.closed = True
-
-
-class AsyncBody(httpx.AsyncByteStream):
-    def __init__(self, blocks, wait=False):
-        self.blocks = blocks
-        self.wait = wait
-        self.waiting = asyncio.Event()
-        self.closed = False
-
-    async def __aiter__(self):
-        for block in self.blocks:
-            yield block
-        if self.wait:
-            self.waiting.set()
-            await asyncio.Event().wait()
-
-    async def aclose(self):
-        self.closed = True
-
-
-class Fixture:
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.token = Path(self.directory.name) / "token"
-        self.token.write_text("synthetic-secret\n")
-
-    def client(self, handler, **kwargs):
-        return Client(base_url="https://gateway.test", token_file=self.token,
-                      transport=httpx.MockTransport(handler), **kwargs)
-
-    def async_client(self, handler):
-        return AsyncClient(base_url="https://gateway.test", token_file=self.token,
-                           transport=httpx.MockTransport(handler))
 
 
 class SyncTests(Fixture, unittest.TestCase):

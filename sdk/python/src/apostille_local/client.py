@@ -392,31 +392,23 @@ class _SSE:
         self.size = 0
         self.cr = False
         self.done = False
-        self.trailing_size = 0
-
-    def _tail(self, block: bytes) -> None:
-        if not block:
-            return
-        # A terminal CR may be followed by LF in this or the next block. That
-        # LF completes the event separator and is not part of the trailing data.
-        if self.cr:
-            self.cr = False
-            if block.startswith(b"\n"):
-                block = block[1:]
-        self.trailing_size += len(block)
-        if self.trailing_size > _MAX_EVENT or block.strip(b"\r\n"):
-            raise APIError("invalid_stream", run_id=self.run_id)
 
     def feed(self, block: bytes) -> Iterator[Response]:
-        if self.done:
-            self._tail(block)
-            return
-        for offset, b in enumerate(block):
+        for b in block:
             if b == 10 and self.cr:
                 self.cr = False
                 continue
-            self.cr = b == 13
+            # Fold event CRLF delimiters, including the LF completing [DONE].
+            # After that delimiter, count every trailing byte toward the limit.
+            self.cr = b == 13 and not self.done
             self.size += 1
+            if self.done:
+                # After [DONE] only blank lines may remain until HTTP EOF.
+                # Keep the terminal event's reset size as the tail byte count.
+                if b not in (10, 13) or self.size > _MAX_EVENT:
+                    self.done = False
+                    raise APIError("invalid_stream", run_id=self.run_id)
+                continue
             if self.size > _MAX_EVENT:
                 raise APIError("stream_event_too_large", run_id=self.run_id)
             if b not in (10, 13):
@@ -436,8 +428,7 @@ class _SSE:
                 continue
             if payload == b"[DONE]":
                 self.done = True
-                self._tail(block[offset + 1:])
-                return
+                continue
             try:
                 result = _json(payload, self.run_id)
             except APIError as exc:
@@ -449,9 +440,6 @@ class _SSE:
             yield result
 
 
-# After [DONE] the stream is read to its end. The gateway settles the receipt
-# before it ends the response, so a fully iterated stream never leaves the
-# receipt pending. Only blank lines may follow [DONE].
 class Stream:
     """Use only inside Client.chat.stream's context manager."""
 
@@ -462,6 +450,7 @@ class Stream:
     def __iter__(self) -> Iterator[Response]:
         parser = _SSE(self.run_id)
         try:
+            # Drain through EOF, after the gateway has settled the receipt.
             for block in self._response.iter_bytes():
                 yield from parser.feed(block)
         except httpx.TimeoutException:
@@ -482,6 +471,7 @@ class AsyncStream:
     async def __aiter__(self) -> AsyncIterator[Response]:
         parser = _SSE(self.run_id)
         try:
+            # Drain through EOF, after the gateway has settled the receipt.
             async for block in self._response.aiter_bytes():
                 for result in parser.feed(block):
                     yield result

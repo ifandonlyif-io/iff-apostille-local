@@ -1,13 +1,13 @@
 """Terminal SSE validation must be independent of HTTP chunk boundaries."""
 
-from pathlib import Path
-import tempfile
+import json
 import unittest
 from unittest.mock import patch
 
 import httpx
 
-from apostille_local import APIError, AsyncClient, Client
+from apostille_local import APIError
+from client_test_helpers import AsyncBody, Fixture, SyncBody
 
 
 MESSAGES = [{"role": "user", "content": "synthetic test"}]
@@ -18,6 +18,9 @@ TERMINATORS = {
     "lf": b"data: [DONE]\n\n",
     "crlf": b"data: [DONE]\r\n\r\n",
     "cr": b"data: [DONE]\r\r",
+    # The final LF completes the standalone CR's separator, including when
+    # transport blocks split those bytes; it does not consume the tail budget.
+    "cr_followed_by_lf": b"data: [DONE]\r\r\n",
 }
 
 
@@ -62,69 +65,37 @@ def tail_limit_cases():
                 yield (ending, length, partition), blocks, length > TAIL_LIMIT
 
 
-class SyncBody(httpx.SyncByteStream):
-    def __init__(self, blocks):
-        self.blocks = [CHUNK, *blocks]
-        self.reads = 0
-        self.exhausted = False
-        self.closed = False
-
-    def __iter__(self):
-        for block in self.blocks:
-            self.reads += 1
-            yield block
-        self.exhausted = True
-
-    def close(self):
-        self.closed = True
+def coalesced_event_cases():
+    data = {"choices": [{"delta": {"content": "synthetic"}}]}
+    usage = {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+    tails = {
+        "blank": (b"\r\n", False),
+        "junk": (b"synthetic-junk", True),
+        "error": (b'data: {"error":{"message":"synthetic"}}\n\n', True),
+    }
+    for name, events in {"data": [data], "usage": [usage], "data_and_usage": [data, usage]}.items():
+        prefix = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+        for ending, terminal in TERMINATORS.items():
+            for tail_name, (tail, invalid) in tails.items():
+                yield (name, ending, tail_name), [prefix + terminal + tail], invalid, events
 
 
-class AsyncBody(httpx.AsyncByteStream):
-    def __init__(self, blocks):
-        self.blocks = [CHUNK, *blocks]
-        self.reads = 0
-        self.exhausted = False
-        self.closed = False
-
-    async def __aiter__(self):
-        for block in self.blocks:
-            self.reads += 1
-            yield block
-        self.exhausted = True
-
-    async def aclose(self):
-        self.closed = True
+def response(body):
+    return httpx.Response(200, headers={"content-type": "text/event-stream", "X-Apostille-Run-ID": RUN_ID},
+                          stream=body)
 
 
-class Fixture:
-    def setUp(self):
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.token = Path(directory.name) / "token"
-        self.token.write_text("synthetic-secret\n")
-
-    def options(self, body):
-        return {
-            "base_url": "https://gateway.test",
-            "token_file": self.token,
-            "transport": httpx.MockTransport(lambda request: httpx.Response(
-                200,
-                headers={"content-type": "text/event-stream", "X-Apostille-Run-ID": RUN_ID},
-                stream=body,
-            )),
-        }
-
-    def assert_complete(self, chunks, body):
-        self.assertEqual(len(chunks), 1)
-        self.assertEqual(chunks[0]["choices"], [])
+class TailFixture(Fixture):
+    def assert_complete(self, chunks, body, expected):
+        self.assertEqual([chunk.to_dict() for chunk in chunks], expected)
         self.assertTrue(body.exhausted, "iterator returned without consuming HTTP EOF")
         self.assertEqual(body.reads, len(body.blocks))
 
 
-class SyncStreamTailTests(Fixture, unittest.TestCase):
-    def check_stream(self, blocks, invalid=False):
+class SyncStreamTailTests(TailFixture, unittest.TestCase):
+    def check_stream(self, blocks, invalid=False, expected=None):
         body = SyncBody(blocks)
-        with Client(**self.options(body)) as client:
+        with self.client(lambda request: response(body)) as client:
             with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
                 self.assertEqual(stream.run_id, RUN_ID)
                 if invalid:
@@ -133,30 +104,35 @@ class SyncStreamTailTests(Fixture, unittest.TestCase):
                     self.assertEqual(caught.exception.code, "invalid_stream")
                     self.assertEqual(caught.exception.run_id, RUN_ID)
                 else:
-                    self.assert_complete(list(stream), body)
+                    self.assert_complete(list(stream), body, expected if expected is not None else [{"choices": []}])
         self.assertTrue(body.closed)
 
     def test_rejects_nonblank_tail_for_all_chunk_boundaries(self):
         for case, blocks in invalid_tail_cases():
             with self.subTest(case=case):
-                self.check_stream(blocks, invalid=True)
+                self.check_stream([CHUNK, *blocks], invalid=True)
 
     def test_blank_tail_consumes_http_eof(self):
         for case, blocks in blank_tail_cases():
             with self.subTest(case=case):
-                self.check_stream(blocks)
+                self.check_stream([CHUNK, *blocks])
 
     def test_tail_limit_counts_same_and_later_chunks(self):
         with patch("apostille_local.client._MAX_EVENT", TAIL_LIMIT):
             for case, blocks, invalid in tail_limit_cases():
                 with self.subTest(case=case):
-                    self.check_stream(blocks, invalid)
+                    self.check_stream([CHUNK, *blocks], invalid)
+
+    def test_events_done_and_tail_in_one_transport_block(self):
+        for case, blocks, invalid, expected in coalesced_event_cases():
+            with self.subTest(case=case):
+                self.check_stream(blocks, invalid, expected)
 
 
-class AsyncStreamTailTests(Fixture, unittest.IsolatedAsyncioTestCase):
-    async def check_stream(self, blocks, invalid=False):
+class AsyncStreamTailTests(TailFixture, unittest.IsolatedAsyncioTestCase):
+    async def check_stream(self, blocks, invalid=False, expected=None):
         body = AsyncBody(blocks)
-        async with AsyncClient(**self.options(body)) as client:
+        async with self.async_client(lambda request: response(body)) as client:
             async with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
                 self.assertEqual(stream.run_id, RUN_ID)
                 if invalid:
@@ -166,21 +142,26 @@ class AsyncStreamTailTests(Fixture, unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(caught.exception.run_id, RUN_ID)
                 else:
                     chunks = [chunk async for chunk in stream]
-                    self.assert_complete(chunks, body)
+                    self.assert_complete(chunks, body, expected if expected is not None else [{"choices": []}])
         self.assertTrue(body.closed)
 
     async def test_rejects_nonblank_tail_for_all_chunk_boundaries(self):
         for case, blocks in invalid_tail_cases():
             with self.subTest(case=case):
-                await self.check_stream(blocks, invalid=True)
+                await self.check_stream([CHUNK, *blocks], invalid=True)
 
     async def test_blank_tail_consumes_http_eof(self):
         for case, blocks in blank_tail_cases():
             with self.subTest(case=case):
-                await self.check_stream(blocks)
+                await self.check_stream([CHUNK, *blocks])
 
     async def test_tail_limit_counts_same_and_later_chunks(self):
         with patch("apostille_local.client._MAX_EVENT", TAIL_LIMIT):
             for case, blocks, invalid in tail_limit_cases():
                 with self.subTest(case=case):
-                    await self.check_stream(blocks, invalid)
+                    await self.check_stream([CHUNK, *blocks], invalid)
+
+    async def test_events_done_and_tail_in_one_transport_block(self):
+        for case, blocks, invalid, expected in coalesced_event_cases():
+            with self.subTest(case=case):
+                await self.check_stream(blocks, invalid, expected)
