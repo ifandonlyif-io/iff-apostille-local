@@ -15,7 +15,7 @@ Use the repository example as a template and supply real values locally.
 | `active_model` | One configured model selected for this runtime. Change through controlled administration. |
 | `models[]` | `id`, immutable `revision`, `manifest_sha256`, `license`, `runtime_image` by `@sha256:`, `precision`, `max_context`, `max_tokens`, `max_concurrent`, local `path`. |
 | `projects[]` | Unique `id`, high-entropy key's `api_key_sha256`, authorized `models`, `max_concurrent`. |
-| `evidence` | Private `directory`, `key_file`, `agent_id`. An empty directory disables evidence storage. |
+| `evidence` | Private `directory`, `key_file` (ML-DSA-65 Apostille JSON key file; an Ed25519 key signs classical Core 0.1), `agent_id`, optional `require_post_quantum` (refuse any key that does not sign Core 0.3). An empty directory disables evidence storage. |
 | `timeout_seconds` | Request budget from 1 to 600 seconds. |
 
 Current configuration supports `bfloat16` and `float16`; adding a model to the

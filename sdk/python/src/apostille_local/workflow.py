@@ -25,6 +25,7 @@ from typing import Iterator
 import uuid
 
 
+_CORE_03 = "https://ifandonlyif.io/apostille/spec/0.3"
 _SCHEMA = "urn:apostille:workflow-event:0.1"
 _SCOPE = "workflow_metadata_only"
 _MAX_INTEGER = 2**53 - 1
@@ -116,7 +117,11 @@ class WorkflowRecorder:
     """Sign one agent's workflow events with an independently pinned policy.
 
     All paths are explicit and absolute. The dedicated archive is created with
-    mode 0700 if absent; existing archives must already have that mode. The
+    mode 0700 if absent; existing archives must already have that mode. The key
+    file is read only by the Go CLI: an Apostille JSON key file (ML-DSA-65 signs
+    Core 0.3) or a legacy classical raw Ed25519 seed (signs Core 0.1). Verification
+    accepts Core 0.1 and Core 0.3 unless ``require_post_quantum=True``, which passes
+    ``--require-post-quantum`` and accepts only Core 0.3 (ML-DSA-65). The
     policy may authorize multiple agents, but this archive accepts only this
     recorder's agent, project and job. Resumption verifies existing signatures
     before deriving sequence and terminal-round guards. Deleting an archive's
@@ -130,7 +135,7 @@ class WorkflowRecorder:
                  agent_id: str, project_id: str, job_id: str,
                  configuration_id: str, model_id: str,
                  framework: str, framework_version: str,
-                 timeout: float = 30.0):
+                 timeout: float = 30.0, require_post_quantum: bool = False):
         try:
             if fcntl is None:
                 raise _Failure("unsupported_platform")
@@ -146,8 +151,9 @@ class WorkflowRecorder:
                     or not isinstance(framework_version, str)
                     or re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,31}", framework_version) is None
                     or isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                    or not 0 < timeout <= 300):
+                    or not 0 < timeout <= 300 or not isinstance(require_post_quantum, bool)):
                 raise _Failure("invalid_configuration")
+            self.require_post_quantum = require_post_quantum
             executable_info = self.executable.lstat()
             if (not stat.S_ISREG(executable_info.st_mode)
                     or not os.access(self.executable, os.X_OK)):
@@ -202,6 +208,21 @@ class WorkflowRecorder:
             yield
         finally:
             os.close(descriptor)
+
+    def _verify_options(self) -> tuple[str, ...]:
+        return ("--require-post-quantum",) if self.require_post_quantum else ()
+
+    def _check_post_quantum(self, verified: dict, failure: str) -> None:
+        """Defense in depth: do not trust that the Go CLI honoured the flag."""
+        if not self.require_post_quantum:
+            return
+        if "core_protocols" in verified:
+            found = verified["core_protocols"]
+            ok = isinstance(found, list) and all(item == _CORE_03 for item in found)
+        else:
+            ok = verified.get("core_protocol") == _CORE_03
+        if not ok:
+            raise _Failure(failure)
 
     def _command(self, *arguments: str, failure: str) -> dict:
         try:
@@ -267,7 +288,9 @@ class WorkflowRecorder:
             # Only an already committed, independently verified receipt can
             # authorize recovery. An interrupted pre-publication stage is kept.
             verified = self._command("verify", "--receipt", str(destination),
-                                     "--policy", str(self.policy_path), failure="archive_invalid")
+                                     "--policy", str(self.policy_path), *self._verify_options(),
+                                     failure="archive_invalid")
+            self._check_post_quantum(verified, "archive_invalid")
             event = _read_receipt(destination, (1, 2))
             if (verified.get("valid") is not True or event["event_id"] != event_id
                     or event["agent_id"] != self.agent_id or event["project_id"] != self.project_id
@@ -409,7 +432,9 @@ class WorkflowRecorder:
             _private_file(path, (1, 2) if path in linked else (1,))
             paths.append(path)
         verified = self._command("verify-set", "--directory", str(self.archive_directory),
-                                 "--policy", str(self.policy_path), failure="archive_invalid")
+                                 "--policy", str(self.policy_path), *self._verify_options(),
+                                 failure="archive_invalid")
+        self._check_post_quantum(verified, "archive_invalid")
         if (verified.get("valid") is not True or verified.get("record_count") != len(paths)
                 or verified.get("project_id") != self.project_id
                 or verified.get("job_id") != self.job_id):
@@ -516,8 +541,10 @@ class WorkflowRecorder:
                     if signed.get("status") != "ready" or signed.get("event_id") != event_id:
                         raise _Failure("signing_failed")
                     verified = self._command("verify", "--receipt", str(signed_path),
-                                             "--policy", str(self.policy_path), *extra,
+                                             "--policy", str(self.policy_path),
+                                             *self._verify_options(), *extra,
                                              failure="receipt_invalid")
+                    self._check_post_quantum(verified, "receipt_invalid")
                     if verified.get("valid") is not True:
                         raise _Failure("receipt_invalid")
                     published_event = _read_receipt(signed_path)

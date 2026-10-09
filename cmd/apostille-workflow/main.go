@@ -16,7 +16,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		if _, err := io.WriteString(stdout, "apostille-workflow: keygen | sign | verify | verify-set\nOffline signed workflow metadata; receiver policy must be independently selected.\n"); err != nil {
+		if _, err := io.WriteString(stdout, "apostille-workflow: keygen | sign | verify | verify-set (verify commands accept --require-post-quantum)\nOffline signed workflow metadata; receiver policy must be independently selected.\n"); err != nil {
 			return 1
 		}
 		return 0
@@ -61,7 +61,7 @@ func execute(args []string) (any, error) {
 	switch args[0] {
 	case "keygen":
 		f := flags(args[0])
-		out := f.String("out-key", "", "exclusive private seed output")
+		out := f.String("out-key", "", "exclusive ML-DSA-65 private key file output")
 		agent := f.String("agent-id", "", "stable producer UUIDv4")
 		if parse(f, args[1:]) != nil || *out == "" || !core.ValidID(*agent) {
 			return nil, workflow.ErrInvalid
@@ -77,7 +77,7 @@ func execute(args []string) (any, error) {
 	case "sign":
 		f := flags(args[0])
 		input := f.String("event", "", "event input")
-		key := f.String("key-file", "", "private seed input")
+		key := f.String("key-file", "", "private key file input (JSON key file or legacy raw Ed25519 seed)")
 		agent := f.String("agent-id", "", "stable producer UUIDv4")
 		out := f.String("out", "", "exclusive receipt output")
 		artifact := f.String("artifact", "", "explicit optional model artifact")
@@ -123,6 +123,7 @@ func execute(args []string) (any, error) {
 		receipt := f.String("receipt", "", "receipt input")
 		policyPath := f.String("policy", "", "independent receiver policy")
 		artifact := f.String("artifact", "", "optional model artifact")
+		requirePQ := f.Bool("require-post-quantum", false, "accept only Core 0.3 (ML-DSA-65) records")
 		if parse(f, args[1:]) != nil || *receipt == "" || *policyPath == "" {
 			return nil, workflow.ErrInvalid
 		}
@@ -134,7 +135,7 @@ func execute(args []string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		result, err := workflow.Verify(raw, policy)
+		result, err := workflow.VerifyWith(raw, policy, workflow.VerifyOptions{RequirePostQuantum: *requirePQ})
 		if err != nil {
 			return nil, err
 		}
@@ -149,6 +150,7 @@ func execute(args []string) (any, error) {
 		f := flags(args[0])
 		directory := f.String("directory", "", "flat receipt archive")
 		policyPath := f.String("policy", "", "independent receiver policy")
+		requirePQ := f.Bool("require-post-quantum", false, "accept only Core 0.3 (ML-DSA-65) records")
 		if parse(f, args[1:]) != nil || *directory == "" || *policyPath == "" {
 			return nil, workflow.ErrInvalid
 		}
@@ -156,7 +158,7 @@ func execute(args []string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return workflow.VerifyDirectory(*directory, policy)
+		return workflow.VerifyDirectoryWith(*directory, policy, workflow.VerifyOptions{RequirePostQuantum: *requirePQ})
 	default:
 		return nil, workflow.ErrInvalid
 	}

@@ -1,7 +1,7 @@
 # Flower workflow evidence preview
 
 A runnable, **single-process CPU integration** of Flower 1.39.0, NumPy and
-Apostille Core 0.1 receipts. Three synthetic sites train a small linear regression
+Apostille Core 0.3 (ML-DSA-65) receipts. Three synthetic sites train a small linear regression
 model over three rounds. Flower's real `ClientApp.train` dispatch,
 `FedAvg.configure_train` and `FedAvg.aggregate_train` are exercised; a small
 in-process node list replaces the network transport. There is no Ray, PyTorch,

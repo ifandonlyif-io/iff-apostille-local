@@ -3,7 +3,6 @@ package evidence
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ifandonlyif-io/iff-apostille-local/internal/config"
+	"github.com/ifandonlyif-io/iff-apostille-local/internal/signingkey"
 	core "github.com/ifandonlyif-io/iff-apostille/apostille"
 )
 
@@ -94,17 +94,33 @@ type Store struct {
 	unavailable map[string]time.Time
 }
 
-func New(dir, keyFile, agentID string) (*Store, error) {
+// Option adjusts how New treats the signing key.
+type Option func(*options)
+
+type options struct{ requirePostQuantum bool }
+
+// RequirePostQuantum makes New refuse a key that does not sign Core 0.3
+// (ML-DSA-65), such as a classical Ed25519 key or the legacy raw seed.
+func RequirePostQuantum() Option { return func(o *options) { o.requirePostQuantum = true } }
+
+// New opens the store. The key file is an Apostille JSON key file (Ed25519 or
+// ML-DSA-65) or the legacy classical raw 32-byte Ed25519 seed; records are
+// signed in the key's natural Core version.
+func New(dir, keyFile, agentID string, opts ...Option) (*Store, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if dir == "" || !core.ValidID(agentID) {
 		return nil, ErrInvalid
 	}
-	seed, err := readSeed(keyFile)
+	raw, err := readKeyFile(keyFile)
 	if err != nil {
 		return nil, err
 	}
-	signer, err := core.NewSigner(base64.RawURLEncoding.EncodeToString(seed))
-	clear(seed)
-	if err != nil {
+	signer, err := signingkey.Parse(raw)
+	clear(raw)
+	if err != nil || (o.requirePostQuantum && !signingkey.PostQuantum(signer)) {
 		return nil, ErrInvalid
 	}
 	if err = os.MkdirAll(dir, 0700); err != nil {
@@ -139,9 +155,9 @@ func New(dir, keyFile, agentID string) (*Store, error) {
 	return s, nil
 }
 
-func readSeed(path string) ([]byte, error) {
+func readKeyFile(path string) ([]byte, error) {
 	before, err := os.Lstat(path)
-	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0077 != 0 || before.Size() != 32 {
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0077 != 0 || before.Size() < signingkey.RawSeedBytes || before.Size() > signingkey.MaxBytes {
 		return nil, ErrInvalid
 	}
 	f, err := os.Open(path)
@@ -153,12 +169,12 @@ func readSeed(path string) ([]byte, error) {
 	if err != nil || !os.SameFile(before, info) || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		return nil, ErrInvalid
 	}
-	seed, err := io.ReadAll(io.LimitReader(f, 33))
-	if err != nil || len(seed) != 32 {
-		clear(seed)
+	raw, err := io.ReadAll(io.LimitReader(f, signingkey.MaxBytes+1))
+	if err != nil || len(raw) > signingkey.MaxBytes {
+		clear(raw)
 		return nil, ErrInvalid
 	}
-	return seed, nil
+	return raw, nil
 }
 
 func (s *Store) Close() error {
@@ -218,12 +234,15 @@ func (s *Store) Complete(projectID, runID string, manifest Manifest) error {
 	if err != nil {
 		return ErrUnavailable
 	}
-	bundle := &core.Bundle{Protocol: core.Protocol, Statement: statement}
+	if statement.Protocol != s.signer.NaturalProtocol() {
+		return ErrUnavailable
+	}
+	bundle := &core.Bundle{Protocol: statement.Protocol, Statement: statement}
 	bundleRaw, err := core.Canonical(bundle)
 	if err != nil {
 		return ErrUnavailable
 	}
-	if _, err = Verify(raw, bundleRaw, s.signer.KeyID()); err != nil {
+	if _, err = VerifyWith(raw, bundleRaw, s.signer.KeyID(), VerifyOptions{}); err != nil {
 		return ErrUnavailable
 	}
 	r.Record = Record{Status: "ready", Manifest: raw, Bundle: bundle}
@@ -497,11 +516,26 @@ type Verification struct {
 	CertificateScope  string `json:"certificate_scope"`
 	IssuerTrust       string `json:"issuer_trust"`
 	RunID             string `json:"run_id"`
+	// CoreProtocol is the Apostille Core version the record is signed under.
+	// Only Core 0.3 (ML-DSA-65) signatures are post-quantum.
+	CoreProtocol string `json:"core_protocol"`
+}
+
+// VerifyOptions tightens verification beyond the default of accepting every
+// Core version this build knows (0.1 and 0.3).
+type VerifyOptions struct {
+	// RequirePostQuantum accepts only Core 0.3 (ML-DSA-65) records.
+	RequirePostQuantum bool
 }
 
 // Verify is offline and authenticates an exact producer pin selected by the
 // caller. Core's issuer_trust remains unknown for a producer-only statement.
 func Verify(artifact, bundleRaw []byte, producerPin string) (Verification, error) {
+	return VerifyWith(artifact, bundleRaw, producerPin, VerifyOptions{})
+}
+
+// VerifyWith is Verify with explicit options.
+func VerifyWith(artifact, bundleRaw []byte, producerPin string, opts VerifyOptions) (Verification, error) {
 	var out Verification
 	if !keyPinPattern.MatchString(producerPin) || len(artifact) > MaxRecordBytes || len(bundleRaw) > core.MaxInputBytes {
 		return out, ErrInvalid
@@ -514,12 +548,16 @@ func Verify(artifact, bundleRaw []byte, producerPin string) (Verification, error
 	if core.StrictJSON(bundleRaw, &bundle) != nil || bundle.Delegation != nil || bundle.Acceptance != nil || bundle.Certificate != nil {
 		return out, ErrInvalid
 	}
-	verified, err := core.Verify(bundleRaw, core.VerifyOptions{})
+	verifyOpts := core.VerifyOptions{}
+	if opts.RequirePostQuantum {
+		verifyOpts.AcceptedProtocols = []string{core.Protocol03}
+	}
+	verified, err := core.Verify(bundleRaw, verifyOpts)
 	if err != nil || !core.VerifyArtifact(verified, artifact) {
 		return out, ErrInvalid
 	}
 	if verified.Statement.IssuerKeyID != producerPin {
 		return out, fmt.Errorf("%w: producer_pin_mismatch", ErrInvalid)
 	}
-	return Verification{SignatureValid: true, ArtifactMatches: true, ProducerKeyPolicy: "matched", EvidenceScope: Scope, CertificateScope: verified.CertificateScope, IssuerTrust: verified.IssuerTrust, RunID: manifest.RunID}, nil
+	return Verification{SignatureValid: true, ArtifactMatches: true, ProducerKeyPolicy: "matched", EvidenceScope: Scope, CertificateScope: verified.CertificateScope, IssuerTrust: verified.IssuerTrust, RunID: manifest.RunID, CoreProtocol: verified.Protocol}, nil
 }

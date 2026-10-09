@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ifandonlyif-io/iff-apostille-local/internal/signingkey"
 	core "github.com/ifandonlyif-io/iff-apostille/apostille"
 )
 
@@ -256,7 +257,7 @@ func TestFileBoundaries(t *testing.T) {
 		t.Fatal(pin, err)
 	}
 	info, _ := os.Stat(key)
-	if info.Mode().Perm() != 0600 || info.Size() != 32 {
+	if info.Mode().Perm() != 0600 || info.Size() <= signingkey.RawSeedBytes {
 		t.Fatal("insecure key")
 	}
 	original, _ := os.ReadFile(key)

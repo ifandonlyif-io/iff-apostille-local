@@ -26,8 +26,9 @@ func run(args []string, output io.Writer) error {
 	artifactPath := flags.String("artifact", "", "local run-manifest.json")
 	bundlePath := flags.String("bundle", "", "local run-bundle.json")
 	producerPin := flags.String("producer-pin", "", "independently selected sha256: producer fingerprint")
+	requirePQ := flags.Bool("require-post-quantum", false, "accept only Core 0.3 (ML-DSA-65) records")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *artifactPath == "" || *bundlePath == "" || *producerPin == "" {
-		return errors.New("usage: apostille-local-verify --artifact FILE --bundle FILE --producer-pin sha256:FINGERPRINT")
+		return errors.New("usage: apostille-local-verify --artifact FILE --bundle FILE --producer-pin sha256:FINGERPRINT [--require-post-quantum]")
 	}
 	artifact, err := readFile(*artifactPath, evidence.MaxRecordBytes)
 	if err != nil {
@@ -37,7 +38,7 @@ func run(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	verified, err := evidence.Verify(artifact, bundle, *producerPin)
+	verified, err := evidence.VerifyWith(artifact, bundle, *producerPin, evidence.VerifyOptions{RequirePostQuantum: *requirePQ})
 	if err != nil {
 		_ = json.NewEncoder(output).Encode(map[string]any{"valid": false, "error": "verification_failed"})
 		return errors.New("verification_failed")

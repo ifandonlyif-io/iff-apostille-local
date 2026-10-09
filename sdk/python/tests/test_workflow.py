@@ -47,12 +47,16 @@ if command == "sign":
     print(json.dumps({"status": "ready", "event_id": event["event_id"]}))
 elif command == "verify":
     receipt = json.loads(pathlib.Path(option("--receipt")).read_text())
-    print(json.dumps({"valid": receipt["bundle"].get("test_verified") is True}))
+    pq = "--require-post-quantum" in arguments and mode != "ignore_flag"
+    print(json.dumps({"valid": receipt["bundle"].get("test_verified") is True,
+                      "core_protocol": "https://ifandonlyif.io/apostille/spec/0.3" if pq or mode == "pq" else "https://ifandonlyif.io/apostille/spec/0.1"}))
 elif command == "verify-set":
     paths = list(pathlib.Path(option("--directory")).glob("*.json"))
     valid = all(json.loads(path.read_text())["bundle"].get("test_verified") is True for path in paths)
     policy = json.loads(pathlib.Path(option("--policy")).read_text())
-    print(json.dumps({"valid": valid, "record_count": len(paths),
+    pq = "--require-post-quantum" in arguments and mode != "ignore_flag"
+    versions = ["https://ifandonlyif.io/apostille/spec/0.3"] if pq or mode == "pq" else ["https://ifandonlyif.io/apostille/spec/0.1"]
+    print(json.dumps({"valid": valid, "record_count": len(paths), "core_protocols": versions,
                       "project_id": policy["project_id"], "job_id": policy["job_id"]}))
 else:
     sys.exit(2)
@@ -103,6 +107,37 @@ class RecorderBoundaryTests(unittest.TestCase):
         archive = b"".join(path.read_bytes() for path in recorder.archive_directory.glob("*.json"))
         self.assertNotIn(b"synthetic-key-not-read-by-python", archive)
         self.assertNotIn(str(self.key).encode(), archive)
+
+    def test_require_post_quantum_passes_flag_and_checks_reported_versions(self):
+        calls = []
+        real = WorkflowRecorder._command
+
+        def spy(recorder, *arguments, failure):
+            calls.append(arguments)
+            return real(recorder, *arguments, failure=failure)
+
+        with patch.object(WorkflowRecorder, "_command", spy):
+            self.assertEqual(self.recorder().record("configuration_approved").status, "ready")
+            default = [c for c in calls if c[0] in ("verify", "verify-set")]
+            self.assertTrue(default and all("--require-post-quantum" not in c for c in default))
+            calls.clear()
+            strict = self.recorder(require_post_quantum=True)
+            self.assertEqual(strict.record("work_completed", round=1).status, "ready")
+            checked = [c for c in calls if c[0] in ("verify", "verify-set")]
+            self.assertTrue(checked and all("--require-post-quantum" in c for c in checked))
+        # A verifier that ignores the flag and reports Core 0.1 is not trusted.
+        self.mode("ignore_flag")
+        with self.assertRaisesRegex(ValueError, "^archive_invalid$"):
+            self.recorder(require_post_quantum=True)
+        self.mode("")
+        with self.assertRaisesRegex(ValueError, "^invalid_configuration$"):
+            self.recorder(require_post_quantum="yes")
+
+    def test_require_post_quantum_rejects_receipt_reported_as_core_01(self):
+        recorder = self.recorder(require_post_quantum=True)
+        self.mode("ignore_flag")
+        outcome = recorder.record("configuration_approved")
+        self.assertEqual((outcome.status, outcome.error), ("failed", "archive_invalid"))
 
     def test_repeated_terminal_round_is_blocked_after_restart(self):
         self.assertEqual(self.recorder().record("work_failed", round=1).status, "ready")

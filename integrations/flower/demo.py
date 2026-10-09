@@ -112,7 +112,7 @@ def run_demo(executable: Path, output: Path, scenario: str,
     for role in roles:
         home = output / role
         home.mkdir(mode=0o700)
-        key = home / "synthetic-key.seed"
+        key = home / "synthetic-key.json"
         agent_id = str(uuid.uuid4())
         public = cli_json(executable, "keygen", "--out-key", str(key), "--agent-id", agent_id)
         identities[role] = (agent_id, key, public["producer_pin"])

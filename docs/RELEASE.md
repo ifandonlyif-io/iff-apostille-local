@@ -8,8 +8,17 @@ deployment is implied by building this repository.
 The Local software preview is **`0.1.0-alpha.2`**; its Python distribution uses
 **`0.1.0a2`**. The gateway reports this software version, the OpenAPI document
 identifies it, and `make preview` writes `dist/0.1.0-alpha.2/`. This is separate
-from the unchanged Apostille Core dependency **`v0.1.0-alpha.1`** and Core 0.1 wire
-format. It does not indicate a package-registry release or hardware qualification.
+from the Apostille Core dependency **`v0.4.0-alpha.1`**, which carries the
+unchanged Core 0.1 wire format and adds Core 0.3 (ML-DSA-65). It does not indicate a package-registry release or hardware qualification.
+
+Post-quantum signatures: new signing keys are ML-DSA-65 JSON key files and sign
+Core 0.3; existing Ed25519 keys (JSON key file or legacy raw seed) keep signing
+classical Core 0.1. Verifiers from this revision accept both and offer
+`--require-post-quantum`. Earlier verifiers cannot read Core 0.3 records, so
+upgrade every receiver's `apostille-local-verify` / `apostille-workflow` before
+enabling Core 0.3 keys. The Go directive and toolchain are 1.27.2 and the
+vulnerability scan uses `govulncheck` v1.8.0. Only Core 0.3 signatures are
+post-quantum.
 
 Local alpha.2 adds receipts whose `finish_reason` may be `tool_calls`, alongside
 `stop` and `length`. The original Local alpha.1 verifier rejects `tool_calls`
@@ -72,8 +81,8 @@ claiming support. Follow the [SDK offline installation instructions](../sdk/pyth
 to install without an index after checking the approved bundle's checksums.
 Preserve the resolved wheel set in each customer release. Likewise preserve
 `go.mod` and `go.sum`, exact runtime
-image digests, model revisions/manifests and backend artifacts. Core 0.1 remains
-the exact dependency version selected in `go.mod`.
+image digests, model revisions/manifests and backend artifacts. The Apostille Core
+dependency stays the exact version selected in `go.mod`.
 
 ## Required release artifacts
 

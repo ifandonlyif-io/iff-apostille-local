@@ -48,6 +48,8 @@ type Evidence struct {
 	Directory string `json:"directory"`
 	KeyFile   string `json:"key_file"`
 	AgentID   string `json:"agent_id"`
+	// RequirePostQuantum refuses a signing key that is not ML-DSA-65 (Core 0.3).
+	RequirePostQuantum bool `json:"require_post_quantum"`
 }
 type Config struct {
 	Version        int       `json:"version"`

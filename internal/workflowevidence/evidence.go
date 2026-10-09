@@ -28,7 +28,10 @@ func Sign(event Event, signer *core.Signer, agentID string, now time.Time) (Reco
 	if err != nil {
 		return Record{}, ErrInvalid
 	}
-	return Record{Event: raw, Bundle: core.Bundle{Protocol: core.Protocol, Statement: statement}}, nil
+	if statement.Protocol != signer.NaturalProtocol() {
+		return Record{}, ErrInvalid
+	}
+	return Record{Event: raw, Bundle: core.Bundle{Protocol: statement.Protocol, Statement: statement}}, nil
 }
 
 func ParseRecord(raw []byte) (Record, error) {
@@ -79,11 +82,26 @@ type Verification struct {
 	ActualExecution      string `json:"actual_execution"`
 	ContentTruth         string `json:"content_truth"`
 	CurrentAuthorization string `json:"current_authorization"`
-	AgentID              string `json:"-"`
-	Event                Event  `json:"-"`
+	// CoreProtocol is the Apostille Core version of the record's signature.
+	// Only Core 0.3 (ML-DSA-65) signatures are post-quantum.
+	CoreProtocol string `json:"core_protocol"`
+	AgentID      string `json:"-"`
+	Event        Event  `json:"-"`
+}
+
+// VerifyOptions tightens verification beyond the default of accepting every
+// Core version this build knows (0.1 and 0.3).
+type VerifyOptions struct {
+	// RequirePostQuantum accepts only Core 0.3 (ML-DSA-65) records.
+	RequirePostQuantum bool
 }
 
 func Verify(raw []byte, policy Policy) (Verification, error) {
+	return VerifyWith(raw, policy, VerifyOptions{})
+}
+
+// VerifyWith is Verify with explicit options.
+func VerifyWith(raw []byte, policy Policy, opts VerifyOptions) (Verification, error) {
 	var out Verification
 	if policy.Validate() != nil {
 		return out, ErrInvalid
@@ -100,7 +118,11 @@ func Verify(raw []byte, policy Policy) (Verification, error) {
 	if err != nil {
 		return out, ErrInvalid
 	}
-	verified, err := core.Verify(bundleRaw, core.VerifyOptions{})
+	verifyOpts := core.VerifyOptions{}
+	if opts.RequirePostQuantum {
+		verifyOpts.AcceptedProtocols = []string{core.Protocol03}
+	}
+	verified, err := core.Verify(bundleRaw, verifyOpts)
 	if err != nil || !core.VerifyArtifact(verified, record.Event) || verified.Statement.ArtifactMediaType != "application/json" || verified.Statement.AgentID != event.AgentID {
 		return out, ErrInvalid
 	}
@@ -121,7 +143,7 @@ func Verify(raw []byte, policy Policy) (Verification, error) {
 	if event.ArtifactSHA256 != "" {
 		binding = "not_checked"
 	}
-	return Verification{Valid: true, ProducerKeyPolicy: "matched", ProjectID: event.ProjectID, JobID: event.JobID, EventID: event.EventID, EventType: event.EventType, EvidenceScope: Scope, ArtifactBinding: binding, ActualExecution: "unknown", ContentTruth: "unknown", CurrentAuthorization: "unknown", AgentID: verified.Statement.AgentID, Event: event}, nil
+	return Verification{Valid: true, ProducerKeyPolicy: "matched", ProjectID: event.ProjectID, JobID: event.JobID, EventID: event.EventID, EventType: event.EventType, EvidenceScope: Scope, ArtifactBinding: binding, ActualExecution: "unknown", ContentTruth: "unknown", CurrentAuthorization: "unknown", CoreProtocol: verified.Protocol, AgentID: verified.Statement.AgentID, Event: event}, nil
 }
 
 type SetVerification struct {
@@ -135,18 +157,26 @@ type SetVerification struct {
 	ActualExecution      string `json:"actual_execution"`
 	ContentTruth         string `json:"content_truth"`
 	CurrentAuthorization string `json:"current_authorization"`
+	// CoreProtocols lists, sorted, each distinct Core version found. A set
+	// mixing Core 0.1 and Core 0.3 records verifies and lists both.
+	CoreProtocols []string `json:"core_protocols"`
 }
 
 // VerifySet checks the selected archive, not a complete distributed history.
 // Removing its last records is undetectable without an independent checkpoint.
 func VerifySet(records [][]byte, policy Policy) (SetVerification, error) {
+	return VerifySetWith(records, policy, VerifyOptions{})
+}
+
+// VerifySetWith is VerifySet with explicit options.
+func VerifySetWith(records [][]byte, policy Policy, opts VerifyOptions) (SetVerification, error) {
 	var out SetVerification
 	if len(records) > MaxRecords || policy.Validate() != nil {
 		return out, ErrInvalid
 	}
 	verified := make([]Verification, 0, len(records))
 	for _, raw := range records {
-		v, err := Verify(raw, policy)
+		v, err := VerifyWith(raw, policy, opts)
 		if err != nil {
 			return out, err
 		}
@@ -188,5 +218,14 @@ func verifySetValues(records []Verification, policy Policy) (SetVerification, er
 			}
 		}
 	}
-	return SetVerification{Valid: true, RecordCount: len(records), ProducerKeyPolicy: "matched", ProjectID: policy.ProjectID, JobID: policy.JobID, EvidenceScope: Scope, ArchiveCompleteness: "unknown", ActualExecution: "unknown", ContentTruth: "unknown", CurrentAuthorization: "unknown"}, nil
+	protocols := map[string]bool{}
+	for _, v := range records {
+		protocols[v.CoreProtocol] = true
+	}
+	found := make([]string, 0, len(protocols))
+	for protocol := range protocols {
+		found = append(found, protocol)
+	}
+	sort.Strings(found)
+	return SetVerification{Valid: true, CoreProtocols: found, RecordCount: len(records), ProducerKeyPolicy: "matched", ProjectID: policy.ProjectID, JobID: policy.JobID, EvidenceScope: Scope, ArchiveCompleteness: "unknown", ActualExecution: "unknown", ContentTruth: "unknown", CurrentAuthorization: "unknown"}, nil
 }

@@ -5,7 +5,6 @@ package integration
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -105,19 +104,22 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion", "created": 1, "model": "qwen3-4b", "usage": usage, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish}}})
 	}))
 	defer backend.Close()
-	key := filepath.Join(dir, "seed")
-	seed := bytes.Repeat([]byte{17}, 32)
-	if err := os.WriteFile(key, seed, 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Provision the receiver pin from the fixture's independently held seed,
-	// never from the evidence API response or its embedded public key.
-	signer, err := core.NewSigner(base64.RawURLEncoding.EncodeToString(seed))
+	key := filepath.Join(dir, "signing-key.json")
+	keyFile, err := core.GenerateMLDSAKeyFile("integration")
 	if err != nil {
 		t.Fatal(err)
 	}
-	producerPin := signer.KeyID()
-	store, err := evidence.New(filepath.Join(dir, "records"), key, "00000000-0000-4000-8000-000000000001")
+	rawKey, err := json.Marshal(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(key, rawKey, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Provision the receiver pin from the fixture's independently held key,
+	// never from the evidence API response or its embedded public key.
+	producerPin := keyFile.KeyID
+	store, err := evidence.New(filepath.Join(dir, "records"), key, "00000000-0000-4000-8000-000000000001", evidence.RequirePostQuantum())
 	if err != nil {
 		t.Fatal(err)
 	}

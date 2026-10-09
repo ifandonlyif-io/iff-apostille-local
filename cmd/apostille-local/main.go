@@ -38,7 +38,11 @@ func run() error {
 	}
 	var store *evidence.Store
 	if c.Evidence.Directory != "" {
-		store, err = evidence.New(c.Evidence.Directory, c.Evidence.KeyFile, c.Evidence.AgentID)
+		var opts []evidence.Option
+		if c.Evidence.RequirePostQuantum {
+			opts = append(opts, evidence.RequirePostQuantum())
+		}
+		store, err = evidence.New(c.Evidence.Directory, c.Evidence.KeyFile, c.Evidence.AgentID, opts...)
 		if err != nil {
 			return fmt.Errorf("evidence_initialization_failed")
 		}

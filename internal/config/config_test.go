@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -124,5 +125,15 @@ func TestEvidenceRequiresCoreAgentIDOnlyWhenEnabled(t *testing.T) {
 	c.Evidence.KeyFile = ""
 	if c.Validate() == nil {
 		t.Fatal("enabled evidence without key file accepted")
+	}
+}
+
+func TestEvidenceRequirePostQuantumIsParsed(t *testing.T) {
+	var c Evidence
+	raw := `{"directory":"/d","key_file":"/k","agent_id":"11111111-1111-4111-8111-111111111111","require_post_quantum":true}`
+	d := json.NewDecoder(strings.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&c); err != nil || !c.RequirePostQuantum {
+		t.Fatal(c, err)
 	}
 }
