@@ -47,6 +47,7 @@ func TestCapabilitiesAreScopedAndDoNotExposeDeployment(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		if enabled {
 			g.c.Models[0].ToolCallParser = "hermes"
+			g.c.Models[0].RuntimeProfile = "vllm-chat-v1"
 		}
 		w := request(g, "GET", "/local/v1/capabilities", tokenA, "", false)
 		var got struct {
@@ -95,6 +96,7 @@ func TestGeneratedToolCallsAreValidatedBeforeSuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g, store, dir := setup(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, tc.body) }, true)
 			g.c.Models[0].ToolCallParser = "hermes"
+			g.c.Models[0].RuntimeProfile = "vllm-chat-v1"
 			w := request(g, "POST", "/v1/chat/completions", tokenA, toolInput(false), true)
 			if (w.Code == 200) != tc.valid {
 				t.Fatal(w.Code, w.Body)
@@ -149,6 +151,7 @@ func TestToolAndUsageStreamsFailClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g, store, _ := setup(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, tc.events) }, true)
 			g.c.Models[0].ToolCallParser = "hermes"
+			g.c.Models[0].RuntimeProfile = "vllm-chat-v1"
 			body := toolInput(true)
 			if tc.usage {
 				body = strings.TrimSuffix(body, "}") + `,"stream_options":{"include_usage":true}}`

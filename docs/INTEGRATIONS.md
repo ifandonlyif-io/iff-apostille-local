@@ -43,7 +43,7 @@ the gateway does not. Enforce network policy at the host as described in
   "object": "apostille_local.capabilities",
   "contract_version": "1",
   "api_family": "chat_completions",
-  "gateway_version": "0.1.0-alpha.1",
+  "gateway_version": "0.1.0-alpha.2",
   "models": [{
     "id": "qwen3-4b",
     "max_context": 4096,
@@ -93,13 +93,15 @@ Omit unused optional fields instead of sending `null`; nullable assistant
 content alongside tool calls is the explicit exception.
 
 Tools must be enabled for the active model by an administrator. The preview
-accepts the pinned model setting `tool_call_parser: "hermes"`; omission disables
-tool calling. The parser is included in asset metadata and the runtime launch
+accepts the pinned model setting `tool_call_parser: "hermes"` together with
+`runtime_profile: "vllm-chat-v1"`; a parser without this profile is rejected at
+configuration validation. Omitting the parser disables tool calling. Both
+settings are included in asset metadata and the runtime launch
 configuration. Qualify the exact image, model revision and chat template before
 offering that feature to users. This setting does not install an agent framework.
 
-For vLLM, administrators can select the pinned `runtime_profile: "vllm-chat-v1"`
-when preparing assets. The gateway then translates a validated named call's
+Administrators select the pinned `runtime_profile: "vllm-chat-v1"` when preparing
+tool-capable vLLM assets. The gateway then translates a validated named call's
 upstream `stop` finish reason to `tool_calls`. Clients use the same contract
 across AMD and NVIDIA deployments. See [runtime profiles and API acceptance](RUNTIME_COMPATIBILITY.md).
 

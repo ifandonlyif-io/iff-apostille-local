@@ -66,8 +66,10 @@ invalid schemas and `length` endings still fail. Streaming data remains
 provisional until `[DONE]`; a terminal chunk does not establish receipt success.
 The profile and model are fixed when each request is admitted.
 
-Omitted/empty `runtime_profile` retains the strict unadapted contract. Unknown
-profiles are rejected. This profile name is a wire-behavior selector, **not** an
+Omitted/empty `runtime_profile` retains the strict unadapted contract when tool
+calling is disabled. The `hermes` parser requires `vllm-chat-v1`; incomplete
+combinations and unknown profiles are rejected before startup. This profile
+name is a wire-behavior selector, **not** an
 image version pin or a claim that all vLLM releases are supported. Prepare each
 CUDA/ROCm image separately with its actual digest and check its launch options,
 model/chat template and responses. The launcher only supports the documented

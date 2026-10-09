@@ -31,7 +31,8 @@ type Model struct {
 	MaxTokens      int    `json:"max_tokens"`
 	MaxConcurrent  int    `json:"max_concurrent"`
 	Path           string `json:"path"`
-	// ToolCallParser is part of the pinned asset manifest. Empty disables tools.
+	// ToolCallParser is part of the pinned asset manifest. Empty disables tools;
+	// hermes requires vllm-chat-v1 to normalize vLLM's named-call finish reason.
 	ToolCallParser string `json:"tool_call_parser,omitempty"`
 	// RuntimeProfile selects an explicit wire adapter, pinned with the image
 	// and model metadata. Empty keeps the original strict response contract.
@@ -123,6 +124,9 @@ func (c Config) Validate() error {
 			return fail()
 		}
 		if m.ToolCallParser != "" && m.ToolCallParser != "hermes" {
+			return fail()
+		}
+		if m.ToolCallParser == "hermes" && m.RuntimeProfile != "vllm-chat-v1" {
 			return fail()
 		}
 		if !ValidID(m.ID) || models[m.ID] || !revision.MatchString(m.Revision) || !hex64.MatchString(m.ManifestSHA256) || !ValidRuntimeImage(m.RuntimeImage) || m.License == "" || m.Path == "" || m.MaxContext < 128 || m.MaxContext > 131072 || m.MaxTokens < 1 || m.MaxTokens >= m.MaxContext || m.MaxConcurrent < 1 || m.MaxConcurrent > 32 || (m.Precision != "bfloat16" && m.Precision != "float16") {

@@ -20,7 +20,7 @@ import (
 	core "github.com/ifandonlyif-io/iff-apostille/apostille"
 )
 
-const Version = "0.1.0-alpha.1"
+const Version = "0.1.0-alpha.2"
 const maxResponse = 2 << 20
 
 type Gateway struct {
@@ -193,6 +193,22 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 		fail(w, 415, "json_required")
 		return
 	}
+	// Admission covers body parsing and schema compilation as well as inference.
+	// Rejected requests must not spend unbounded CPU before acquiring capacity.
+	select {
+	case g.slots <- struct{}{}:
+		defer func() { <-g.slots }()
+	default:
+		fail(w, 429, "capacity_exceeded")
+		return
+	}
+	select {
+	case g.projects[p.ID] <- struct{}{}:
+		defer func() { <-g.projects[p.ID] }()
+	default:
+		fail(w, 429, "project_capacity_exceeded")
+		return
+	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		fail(w, 413, "request_too_large")
@@ -219,20 +235,6 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 	}
 	if record != "" && g.store == nil {
 		fail(w, 503, "evidence_disabled")
-		return
-	}
-	select {
-	case g.slots <- struct{}{}:
-		defer func() { <-g.slots }()
-	default:
-		fail(w, 429, "capacity_exceeded")
-		return
-	}
-	select {
-	case g.projects[p.ID] <- struct{}{}:
-		defer func() { <-g.projects[p.ID] }()
-	default:
-		fail(w, 429, "project_capacity_exceeded")
 		return
 	}
 	if g.draining.Load() {

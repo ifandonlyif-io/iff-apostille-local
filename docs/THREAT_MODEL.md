@@ -28,8 +28,10 @@ different model/provider after a failure.
 - The runtime receives content in memory. Operators must disable runtime prompt
   logging, debug traces, core dumps and external telemetry. The gateway cannot
   enforce every runtime's retention behavior.
-- Resource limits constrain request size, schema shape and concurrency; they do
-  not establish a GPU throughput or denial-of-service guarantee.
+- Resource limits constrain request size, schema shape and concurrency. Global
+  and project slots cover body reading, validation/schema compilation and runtime
+  inference; saturation returns 429 before parsing another body. They do not
+  establish a GPU throughput or denial-of-service guarantee.
 - Function calls are untrusted model output. The gateway validates their wire
   format and, for strict definitions, argument schema; the customer application
   must independently authorize each action and constrain its tool sandbox.

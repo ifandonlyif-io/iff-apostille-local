@@ -20,7 +20,6 @@ from pathlib import Path
 import re
 import stat
 import subprocess
-import tempfile
 import time
 from typing import Iterator
 import uuid
@@ -30,6 +29,9 @@ _SCHEMA = "urn:apostille:workflow-event:0.1"
 _SCOPE = "workflow_metadata_only"
 _MAX_INTEGER = 2**53 - 1
 _MAX_RECEIPT_BYTES = 64 * 1024
+_MAX_ATTEMPT_STREAMS = 128
+_MAX_RECOVERY_STAGES = 32
+_ATTEMPT_SCHEMA = "urn:apostille:workflow-attempt-state:0.1"
 _WORK = frozenset({"work_completed", "work_failed", "work_cancelled"})
 _ARTIFACT = frozenset({"model_released", "deployment_accepted"})
 _EVENTS = _WORK | _ARTIFACT | {"configuration_approved"}
@@ -47,6 +49,7 @@ class ReceiptOutcome:
     receipt_path: Path | None
     event_id: str
     error: str | None = None
+    warning: str | None = None
 
 
 class _Failure(Exception):
@@ -71,30 +74,35 @@ def _absolute(value: os.PathLike[str] | str) -> Path:
     return path
 
 
-def _private_file(path: Path) -> os.stat_result:
+def _private_file(path: Path, links: tuple[int, ...] = (1,)) -> os.stat_result:
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1):
+            or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink not in links):
         raise _Failure("unsafe_file")
     return info
 
 
-def _read_receipt(path: Path) -> dict:
-    info = _private_file(path)
+def _read_private(path: Path, links: tuple[int, ...] = (1,)) -> bytes:
+    info = _private_file(path, links)
     if info.st_size > _MAX_RECEIPT_BYTES:
         raise _Failure("archive_invalid")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                or opened.st_nlink not in links):
             raise _Failure("archive_invalid")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             raw = source.read(_MAX_RECEIPT_BYTES + 1)
         if len(raw) > _MAX_RECEIPT_BYTES:
             raise _Failure("archive_invalid")
-        receipt = json.loads(raw)
     finally:
         os.close(descriptor)
+    return raw
+
+
+def _read_receipt(path: Path, links: tuple[int, ...] = (1,)) -> dict:
+    receipt = json.loads(_read_private(path, links))
     if not isinstance(receipt, dict) or set(receipt) != {"event", "bundle"}:
         raise _Failure("archive_invalid")
     event = receipt["event"]
@@ -156,6 +164,7 @@ class WorkflowRecorder:
             self._archive_identity = self._check_archive()
             with self._locked():
                 self._state()
+                self._attempts()
         except (_Failure, OSError, ValueError, TypeError, OverflowError) as exc:
             code = exc.code if isinstance(exc, _Failure) else "invalid_configuration"
             raise ValueError(code) from None
@@ -214,15 +223,190 @@ class WorkflowRecorder:
             raise _Failure(failure)
         return output
 
+    @staticmethod
+    def _cleanup_staging(pending: Path) -> bool:
+        # Caller either created this directory or validated its committed receipt.
+        # Stop at the first failure so recovery retains the remaining correlation.
+        try:
+            for name in ("receipt.json", "event.json"):
+                try:
+                    (pending / name).unlink()
+                except FileNotFoundError:
+                    pass
+            pending.rmdir()
+            return True
+        except OSError:
+            return False
+
+    def _recover_publications(self) -> tuple[set[str], set[Path]]:
+        stages, linked = set(), set()
+        examined = 0
+        for pending in self.archive_directory.iterdir():
+            if not pending.name.startswith(".apostille-workflow-"):
+                continue
+            event_id = pending.name.removeprefix(".apostille-workflow-")
+            examined += 1
+            if not _uuid(event_id) or examined > _MAX_RECOVERY_STAGES:
+                raise _Failure("archive_invalid")
+            info = pending.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700):
+                raise _Failure("archive_invalid")
+            names = {entry.name for entry in pending.iterdir()}
+            if not names <= {"event.json", "receipt.json"}:
+                raise _Failure("archive_invalid")
+            destination = self.archive_directory / f"{event_id}.json"
+            dest_info = _private_file(destination, (1, 2))
+            source = pending / "receipt.json"
+            if "receipt.json" in names:
+                source_info = _private_file(source, (2,))
+                if (source_info.st_dev, source_info.st_ino) != (dest_info.st_dev, dest_info.st_ino):
+                    raise _Failure("archive_invalid")
+            elif dest_info.st_nlink != 1:
+                raise _Failure("archive_invalid")
+            # Only an already committed, independently verified receipt can
+            # authorize recovery. An interrupted pre-publication stage is kept.
+            verified = self._command("verify", "--receipt", str(destination),
+                                     "--policy", str(self.policy_path), failure="archive_invalid")
+            event = _read_receipt(destination, (1, 2))
+            if (verified.get("valid") is not True or event["event_id"] != event_id
+                    or event["agent_id"] != self.agent_id or event["project_id"] != self.project_id
+                    or event["job_id"] != self.job_id):
+                raise _Failure("archive_invalid")
+            if "event.json" in names:
+                original = json.loads(_read_private(pending / "event.json"))
+                expected = dict(event)
+                expected["artifact_sha256"], expected["artifact_size"] = "", ""
+                if original != expected:
+                    raise _Failure("archive_invalid")
+            if not self._cleanup_staging(pending):
+                stages.add(pending.name)
+                if destination.stat().st_nlink == 2:
+                    linked.add(destination)
+        return stages, linked
+
+    @staticmethod
+    def _sync_directory(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _parse_attempts(self, path: Path) -> dict:
+        def object_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise _Failure("attempt_state_invalid")
+                result[key] = value
+            return result
+        try:
+            state = json.loads(_read_private(path), object_pairs_hook=object_pairs)
+            if (not isinstance(state, dict)
+                    or set(state) != {"schema", "agent_id", "project_id", "job_id", "streams"}
+                    or state["schema"] != _ATTEMPT_SCHEMA or state["agent_id"] != self.agent_id
+                    or state["project_id"] != self.project_id or state["job_id"] != self.job_id
+                    or not isinstance(state["streams"], list)
+                    or not 1 <= len(state["streams"]) <= _MAX_ATTEMPT_STREAMS):
+                raise _Failure("attempt_state_invalid")
+            seen = set()
+            for stream in state["streams"]:
+                if (not isinstance(stream, dict)
+                        or set(stream) != {"configuration_id", "model_id", "framework", "round"}
+                        or not _uuid(stream["configuration_id"]) or not _uuid(stream["model_id"])
+                        or not isinstance(stream["framework"], str)
+                        or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", stream["framework"]) is None
+                        or not isinstance(stream["round"], str)
+                        or re.fullmatch(r"[1-9][0-9]{0,15}", stream["round"]) is None
+                        or int(stream["round"]) > _MAX_INTEGER):
+                    raise _Failure("attempt_state_invalid")
+                key = (stream["configuration_id"], stream["model_id"], stream["framework"])
+                if key in seen:
+                    raise _Failure("attempt_state_invalid")
+                seen.add(key)
+            return state
+        except (_Failure, OSError, ValueError, TypeError, OverflowError):
+            raise _Failure("attempt_state_invalid") from None
+
+    def _attempts(self) -> dict:
+        current = self.archive_directory / ".attempts"
+        pending = self.archive_directory / ".attempts.pending"
+        state = (self._parse_attempts(current) if current.exists() or current.is_symlink() else
+                 {"schema": _ATTEMPT_SCHEMA, "agent_id": self.agent_id,
+                  "project_id": self.project_id, "job_id": self.job_id, "streams": []})
+        if pending.exists() or pending.is_symlink():
+            proposed = self._parse_attempts(pending)
+            previous = {(s["configuration_id"], s["model_id"], s["framework"]): int(s["round"])
+                        for s in state["streams"]}
+            following = {(s["configuration_id"], s["model_id"], s["framework"]): int(s["round"])
+                         for s in proposed["streams"]}
+            if any(following.get(key, -1) < value for key, value in previous.items()):
+                raise _Failure("attempt_state_invalid")
+            # Conservatively consume a fully written pending reservation after a
+            # crash. This does not say whether training ever started.
+            os.replace(pending, current)
+            self._sync_directory(self.archive_directory)
+            state = proposed
+        return state
+
+    def reserve_round(self, round: int) -> None:
+        """Durably consume the next local attempt before dispatch/training.
+
+        This unsigned operational state survives signing failures; it is not
+        execution evidence or a model checkpoint. A caller chooses recovery and
+        supplies the model state. Never reset it to retry work after a crash.
+        """
+        try:
+            if type(round) is not int or not 0 < round <= _MAX_INTEGER:
+                raise _Failure("invalid_round")
+            with self._locked():
+                _, signed = self._state()
+                state = self._attempts()
+                stream = next((s for s in state["streams"]
+                               if s["configuration_id"] == self.configuration_id
+                               and s["model_id"] == self.model_id and s["framework"] == self.framework), None)
+                high = max(max((int(n) for n in signed), default=0),
+                           int(stream["round"]) if stream else 0)
+                if round != high + 1:
+                    raise _Failure("round_rejected")
+                if stream is None:
+                    if len(state["streams"]) >= _MAX_ATTEMPT_STREAMS:
+                        raise _Failure("attempt_state_full")
+                    stream = {"configuration_id": self.configuration_id, "model_id": self.model_id,
+                              "framework": self.framework, "round": str(round)}
+                    state["streams"].append(stream)
+                else:
+                    stream["round"] = str(round)
+                raw = json.dumps(state, separators=(",", ":"), sort_keys=True).encode()
+                if len(raw) > _MAX_RECEIPT_BYTES:
+                    raise _Failure("attempt_state_full")
+                pending = self.archive_directory / ".attempts.pending"
+                descriptor = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(pending, self.archive_directory / ".attempts")
+                self._sync_directory(self.archive_directory)
+        except (_Failure, OSError, ValueError, TypeError, OverflowError) as exc:
+            code = exc.code if isinstance(exc, _Failure) else "attempt_state_unavailable"
+            raise ValueError(code) from None
+
     def _state(self) -> tuple[int, set[str]]:
         # Reject symlinks and unknown files before asking the verifier to open them.
+        stages, linked = self._recover_publications()
+        self._pending_cleanup_count = len(stages)
         paths = []
         for path in self.archive_directory.iterdir():
-            if path.name == ".lock":
+            if path.name == ".lock" or path.name in stages:
+                continue
+            if path.name in {".attempts", ".attempts.pending"}:
+                self._parse_attempts(path)
                 continue
             if path.suffix != ".json" or not _uuid(path.stem):
                 raise _Failure("archive_invalid")
-            _private_file(path)
+            _private_file(path, (1, 2) if path in linked else (1,))
             paths.append(path)
         verified = self._command("verify-set", "--directory", str(self.archive_directory),
                                  "--policy", str(self.policy_path), failure="archive_invalid")
@@ -233,7 +417,7 @@ class WorkflowRecorder:
         sequences: set[int] = set()
         rounds: set[str] = set()
         for path in paths:
-            event = _read_receipt(path)
+            event = _read_receipt(path, (1, 2) if path in linked else (1,))
             if (event["project_id"] != self.project_id or event["job_id"] != self.job_id
                     or event["agent_id"] != self.agent_id or event["event_id"] != path.stem
                     or event["schema"] != _SCHEMA or event["evidence_scope"] != _SCOPE
@@ -259,10 +443,9 @@ class WorkflowRecorder:
     def latest_round(self) -> int:
         """Highest verified terminal round in the current configuration stream.
 
-        Framework adapters may use this to reject old rounds before training.
-        The caller must own training exclusively: the archive lock protects
-        receipt writing and does not make model execution exactly-once. If
-        signing failed, the framework's own checkpoint remains authoritative.
+        This excludes unsigned attempt reservations. Framework adapters use
+        reserve_round before work so missing signatures cannot reopen an attempt.
+        Neither method supplies a model checkpoint or proves model execution.
         """
         try:
             with self._locked():
@@ -305,6 +488,8 @@ class WorkflowRecorder:
                     raise _Failure("round_not_increasing")
                 if sequence >= _MAX_INTEGER:
                     raise _Failure("sequence_exhausted")
+                if self._pending_cleanup_count >= _MAX_RECOVERY_STAGES:
+                    raise _Failure("cleanup_required")
                 event = {"schema": _SCHEMA, "evidence_scope": _SCOPE,
                          "project_id": self.project_id, "job_id": self.job_id,
                          "agent_id": self.agent_id, "event_id": event_id,
@@ -313,12 +498,13 @@ class WorkflowRecorder:
                          "event_type": event_type, "framework": self.framework,
                          "framework_version": self.framework_version,
                          "artifact_sha256": "", "artifact_size": ""}
-                # A private subdirectory stays outside the root receipt scan and
-                # on the same filesystem even when the archive is a mount point.
-                # An interrupted leftover directory makes the next scan fail closed.
-                with tempfile.TemporaryDirectory(prefix=".apostille-workflow-",
-                                                 dir=self.archive_directory) as temporary:
-                    pending = Path(temporary)
+                # UUID-named staging is recoverable only when a matching
+                # independently verified receipt was already published.
+                pending = self.archive_directory / f".apostille-workflow-{event_id}"
+                pending.mkdir(mode=0o700)
+                published = False
+                warning = None
+                try:
                     event_path, signed_path = pending / "event.json", pending / "receipt.json"
                     descriptor = os.open(event_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
@@ -342,22 +528,21 @@ class WorkflowRecorder:
                         raise _Failure("receipt_invalid")
                     self._check_archive()
                     destination = self.archive_directory / f"{event_id}.json"
-                    # Link publishes exclusively and atomically on this filesystem.
-                    # A signer failure never reserves a sequence or enters the archive.
+                    # This is the exclusive publication/commit point. Never
+                    # report an uncommitted failure or remove it after this link.
                     os.link(signed_path, destination, follow_symlinks=False)
-                    signed_path.unlink()
+                    published = True
                     try:
                         with destination.open("rb") as receipt:
                             os.fsync(receipt.fileno())
-                        directory_fd = os.open(self.archive_directory, os.O_RDONLY | os.O_DIRECTORY)
-                        try:
-                            os.fsync(directory_fd)
-                        finally:
-                            os.close(directory_fd)
+                        self._sync_directory(self.archive_directory)
                     except OSError:
-                        destination.unlink()
-                        raise
-                return ReceiptOutcome("ready", destination, event_id)
+                        warning = "durability_uncertain"
+                finally:
+                    cleaned = self._cleanup_staging(pending)
+                    if published and not cleaned:
+                        warning = "cleanup_pending" if warning is None else "cleanup_pending_durability_uncertain"
+                return ReceiptOutcome("ready", destination, event_id, warning=warning)
         except (_Failure, OSError, ValueError, TypeError, OverflowError) as exc:
             code = exc.code if isinstance(exc, _Failure) else "recording_failed"
             return ReceiptOutcome("failed", None, event_id, code)

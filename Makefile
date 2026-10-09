@@ -1,6 +1,6 @@
 PYTHON ?= python3
 FLOWER_PYTHON ?= $(PYTHON)
-VERSION ?= 0.1.0-alpha.1
+VERSION ?= 0.1.0-alpha.2
 export GOWORK := off
 .PHONY: check test race vet build sdk-test workflow-test flower-test deployment-test compose-check acceptance-test integration fuzz security preview clean
 
@@ -59,6 +59,7 @@ security:
 
 # Local preview only; release artifacts still need the actual pinned runtime/model SBOM.
 preview:
+	$(PYTHON) tools/preview_manifest.py "dist/$(VERSION)" --version "$(VERSION)" --prepare
 	mkdir -p dist/$(VERSION)/linux-amd64
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/$(VERSION)/linux-amd64/apostille-local ./cmd/apostille-local
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/$(VERSION)/linux-amd64/apostille-local-admin ./cmd/apostille-local-admin
@@ -66,7 +67,7 @@ preview:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/$(VERSION)/linux-amd64/apostille-workflow ./cmd/apostille-workflow
 	$(PYTHON) -m build --outdir dist/$(VERSION)/python sdk/python
 	$(PYTHON) -m pip download --require-hashes --no-deps --only-binary=:all: --python-version 3.11 --platform manylinux2014_x86_64 -r sdk/python/requirements-linux-py311.lock --dest dist/$(VERSION)/wheelhouse
-	$(PYTHON) tools/preview_manifest.py dist/$(VERSION)
+	$(PYTHON) tools/preview_manifest.py "dist/$(VERSION)" --version "$(VERSION)"
 
 clean:
 	rm -rf bin dist

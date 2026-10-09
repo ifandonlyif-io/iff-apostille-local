@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 from apostille_local.workflow import WorkflowRecorder
@@ -146,6 +147,50 @@ class WorkflowLiveTests(unittest.TestCase):
         data = outcome.receipt_path.read_bytes()
         self.assertNotIn(good_key, data)
         self.assertNotIn(str(self.key).encode(), data)
+
+    def test_committed_link_cleanup_failure_keeps_verified_receipt_and_recovers(self):
+        recorder = self.recorder()
+        original = Path.unlink
+        def unlink(path, *args, **kwargs):
+            if path.name == "receipt.json" and path.parent.name.startswith(".apostille-workflow-"):
+                raise PermissionError("SYNTHETIC_PRIVATE_CLEANUP_ERROR")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "unlink", unlink):
+            first = recorder.record("work_completed", round=1)
+            self.assertEqual((first.status, first.warning), ("ready", "cleanup_pending"))
+            self.assertEqual(first.receipt_path.stat().st_nlink, 2)
+            self.command("verify", "--receipt", first.receipt_path, "--policy", self.policy)
+            resumed = self.recorder()
+            self.assertEqual(resumed.latest_round, 1)
+            resumed.reserve_round(2)
+            second = resumed.record("work_completed", round=2)
+            self.assertEqual((second.status, second.warning), ("ready", "cleanup_pending"))
+            verified = self.command("verify-set", "--directory", recorder.archive_directory,
+                                    "--policy", self.policy)
+            self.assertEqual(verified["record_count"], 2)
+        recovered = self.recorder()
+        self.assertEqual(recovered.latest_round, 2)
+        self.assertEqual(first.receipt_path.stat().st_nlink, 1)
+        self.assertEqual(second.receipt_path.stat().st_nlink, 1)
+        self.assertEqual(list(recovered.archive_directory.glob(".apostille-workflow-*")), [])
+
+    def test_attempt_high_water_is_operational_not_fabricated_evidence(self):
+        recorder = self.recorder()
+        recorder.reserve_round(1)
+        good_key = self.key.read_bytes()
+        self.key.write_bytes(b"bad synthetic key")
+        self.assertEqual(recorder.record("work_completed", round=1).status, "failed")
+        self.key.write_bytes(good_key)
+        resumed = self.recorder()
+        with self.assertRaisesRegex(ValueError, "^round_rejected$"):
+            resumed.reserve_round(1)
+        resumed.reserve_round(2)
+        outcome = resumed.record("work_completed", round=2)
+        self.assertEqual(outcome.status, "ready")
+        verified = self.command("verify-set", "--directory", resumed.archive_directory, "--policy", self.policy)
+        self.assertEqual(verified["record_count"], 1)
+        self.assertEqual(json.loads(outcome.receipt_path.read_bytes())["event"]["round"], "2")
+        self.assertEqual(json.loads(outcome.receipt_path.read_bytes())["event"]["sequence"], "1")
 
     def test_valid_wrong_key_cannot_publish_or_poison_archive(self):
         other_key = self.root / "wrong-key.json"

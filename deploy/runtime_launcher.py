@@ -13,6 +13,9 @@ import sys
 
 ALLOWED = {".json", ".safetensors", ".model", ".txt", ".md", ".tiktoken", ".vocab", ".merges"}
 ATTRIBUTION = {"LICENSE", "LICENCE", "NOTICE", "COPYING"}
+MODEL_FIELDS = {"id", "revision", "manifest_sha256", "license", "runtime_image",
+                "precision", "max_context", "max_tokens", "max_concurrent", "path"}
+OPTIONAL_MODEL_FIELDS = {"tool_call_parser", "runtime_profile"}
 
 
 def fail(code):
@@ -38,22 +41,45 @@ def read_json(path, limit):
     return json.loads(raw, object_pairs_hook=no_duplicate_keys), raw
 
 
+def validate_runtime_options(model):
+    parser = model.get("tool_call_parser", "")
+    profile = model.get("runtime_profile", "")
+    if parser not in ("", "hermes"):
+        fail("unsupported_tool_call_parser")
+    if profile not in ("", "vllm-chat-v1"):
+        fail("unsupported_runtime_profile")
+    if parser == "hermes" and profile != "vllm-chat-v1":
+        fail("tool_parser_requires_vllm_profile")
+
+
+def normalized_model(model):
+    # Go Model uses omitempty for exactly these two optional strings. Treat
+    # omitted and explicitly empty equally, never nulls or arbitrary fields.
+    if (not isinstance(model, dict) or not MODEL_FIELDS <= model.keys()
+            or model.keys() - MODEL_FIELDS - OPTIONAL_MODEL_FIELDS):
+        fail("model_metadata_mismatch")
+    integer_fields = {"max_context", "max_tokens", "max_concurrent"}
+    if any(type(model[key]) is not (int if key in integer_fields else str)
+           for key in MODEL_FIELDS):
+        fail("model_metadata_mismatch")
+    validate_runtime_options(model)
+    return {key: value for key, value in model.items()
+            if key not in OPTIONAL_MODEL_FIELDS or value != ""}
+
+
 def validate(config_path, bundle):
     config, _ = read_json(Path(config_path), 1 << 20)
     models = [m for m in config["models"] if m["id"] == config["active_model"]]
     if len(models) != 1:
         fail("active_model_missing")
     model = models[0]
+    normalized_model(model)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", model["id"]):
         fail("invalid_model_id")
     if not re.fullmatch(r"[^\s]+@sha256:[a-f0-9]{64}", model["runtime_image"]):
         fail("image_digest_required")
     if model["precision"] not in ("float16", "bfloat16"):
         fail("unsupported_precision")
-    if model.get("tool_call_parser", "") not in ("", "hermes"):
-        fail("unsupported_tool_call_parser")
-    if model.get("runtime_profile", "") not in ("", "vllm-chat-v1"):
-        fail("unsupported_runtime_profile")
     for key, lower, upper in (("max_context", 128, 131072), ("max_tokens", 1, 131071), ("max_concurrent", 1, 32)):
         if type(model[key]) is not int or not lower <= model[key] <= upper:
             fail("invalid_model_limits")
@@ -66,7 +92,8 @@ def validate(config_path, bundle):
     if hashlib.sha256(raw).hexdigest() != model["manifest_sha256"]:
         fail("manifest_hash_mismatch")
     expected_model = dict(model, path="", manifest_sha256="")
-    if manifest.get("version") != 1 or manifest.get("model") != expected_model:
+    if (manifest.get("version") != 1
+            or normalized_model(manifest.get("model")) != normalized_model(expected_model)):
         fail("model_metadata_mismatch")
     entries = manifest.get("files")
     if not isinstance(entries, list) or not 1 <= len(entries) <= 100001:
@@ -112,8 +139,7 @@ def validate(config_path, bundle):
 
 
 def command(model, bundle):
-    if model.get("runtime_profile", "") not in ("", "vllm-chat-v1"):
-        fail("unsupported_runtime_profile")
+    validate_runtime_options(model)
     args = [sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", str(Path(bundle) / "model"), "--tokenizer", str(Path(bundle) / "model"),
             "--served-model-name", model["id"], "--host", "0.0.0.0", "--port", "8000",
@@ -123,8 +149,6 @@ def command(model, bundle):
             "--no-enable-log-requests", "--no-enable-log-outputs", "--disable-log-stats",
             "--disable-uvicorn-access-log"]
     parser = model.get("tool_call_parser", "")
-    if parser not in ("", "hermes"):
-        fail("unsupported_tool_call_parser")
     if parser:
         args += ["--enable-auto-tool-choice", "--tool-call-parser", parser]
     return args

@@ -77,7 +77,10 @@ apostille-local-admin assets prepare \
 ```
 
 Function calling is disabled by default. To prepare an approved tool-capable
-model, append `--tool-call-parser hermes` to `assets prepare`. The CLI includes
+model, append `--tool-call-parser hermes` to `assets prepare` and retain
+`--runtime-profile vllm-chat-v1`. Hermes requires that profile: both configuration
+validation and the runtime launcher reject Hermes with an empty profile, because
+named tool calls need the vLLM finish-reason adapter. The CLI includes
 `tool_call_parser` in the model metadata and the launcher derives its parser
 flags from that pinned metadata. No arbitrary parser or plugin path is accepted.
 Changing the parser requires preparing a **new bundle**, reviewing its new
@@ -90,8 +93,9 @@ for the separate client-side tool execution boundary.
 The explicit `--runtime-profile vllm-chat-v1` selects the narrowly scoped vLLM
 wire adapter. It normalizes a fully validated named function call's terminal
 `stop` to `tool_calls`, including streams. Omission keeps the strict unadapted
-contract. This profile is also pinned in the bundle: changing it requires a new
-bundle and catalog pin. It neither selects an image version nor enables tools.
+contract and is supported only with tool calling disabled. This profile is also
+pinned in the bundle: changing it requires a new bundle and catalog pin. It
+neither selects an image version nor enables tools.
 The NVIDIA CUDA and AMD ROCm images need separate reviewed digests and matching
 bundles. See [runtime compatibility](../docs/RUNTIME_COMPATIBILITY.md) for the
 source evidence and acceptance limits.
@@ -150,6 +154,10 @@ catalog entry, `listen` to `0.0.0.0:8443`, and `runtime_url` to
 `/tls/server.key`; use a customer CA certificate with both the customer endpoint
 and `localhost` as appropriate SANs. The admin readiness check verifies TLS and
 uses a loopback URL; it never offers a skip-verification flag.
+
+Empty `tool_call_parser` and `runtime_profile` strings are equivalent to omitted
+fields, matching the Go manifest encoder. No other field is normalized or
+ignored; nonempty options must match the pinned manifest exactly.
 
 Optional evidence uses `directory: /evidence`, `key_file: /signing/seed.bin`, and
 an Apostille Core UUID `agent_id`. The seed must be a locally generated raw

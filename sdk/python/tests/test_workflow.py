@@ -145,11 +145,16 @@ class RecorderBoundaryTests(unittest.TestCase):
 
     def test_staging_shares_archive_filesystem_and_interrupted_staging_fails_closed(self):
         recorder = self.recorder()
-        with patch("apostille_local.workflow.tempfile.TemporaryDirectory",
-                   wraps=tempfile.TemporaryDirectory) as temporary:
+        observed = []
+        original = recorder._command
+        def command(*arguments, **kwargs):
+            if arguments[0] == "sign":
+                observed.append(Path(arguments[arguments.index("--out") + 1]).parent.parent)
+            return original(*arguments, **kwargs)
+        with patch.object(recorder, "_command", side_effect=command):
             outcome = recorder.record("configuration_approved")
         self.assertEqual(outcome.status, "ready")
-        self.assertEqual(temporary.call_args.kwargs["dir"], recorder.archive_directory)
+        self.assertEqual(observed, [recorder.archive_directory])
         self.assertEqual(list(recorder.archive_directory.glob(".apostille-workflow-*")), [])
         interrupted = recorder.archive_directory / ".apostille-workflow-interrupted"
         interrupted.mkdir(mode=0o700)
@@ -158,6 +163,150 @@ class RecorderBoundaryTests(unittest.TestCase):
             self.recorder()
         self.assertEqual(recorder.record("work_completed", round=1).error, "archive_invalid")
         self.assertEqual(len(list(recorder.archive_directory.glob("*.json"))), 1)
+
+    def test_durable_attempt_survives_signing_failure_and_restart(self):
+        recorder = self.recorder()
+        recorder.reserve_round(1)
+        self.mode("fail")
+        self.assertEqual(recorder.record("work_completed", round=1).status, "failed")
+        self.assertEqual(recorder.latest_round, 0)
+        self.mode("")
+        resumed = self.recorder()
+        with self.assertRaisesRegex(ValueError, "^round_rejected$"):
+            resumed.reserve_round(1)
+        resumed.reserve_round(2)
+        self.assertEqual(resumed.record("work_completed", round=2).status, "ready")
+        self.assertEqual(resumed.latest_round, 2)
+        self.assertEqual(json.loads((resumed.archive_directory / ".attempts").read_text())["streams"][0]["round"], "2")
+        self.assertEqual(len(list(resumed.archive_directory.glob("*.json"))), 1)
+
+    def test_atomic_pending_attempt_recovers_conservatively(self):
+        recorder = self.recorder()
+        with patch("apostille_local.workflow.os.replace", side_effect=OSError("synthetic")):
+            with self.assertRaisesRegex(ValueError, "^attempt_state_unavailable$"):
+                recorder.reserve_round(1)
+        self.assertTrue((recorder.archive_directory / ".attempts.pending").exists())
+        resumed = self.recorder()
+        self.assertFalse((resumed.archive_directory / ".attempts.pending").exists())
+        with self.assertRaisesRegex(ValueError, "^round_rejected$"):
+            resumed.reserve_round(1)
+        resumed.reserve_round(2)
+
+    def test_attempts_are_context_bound_bounded_and_private(self):
+        recorder = self.recorder()
+        recorder.reserve_round(1)
+        marker = recorder.archive_directory / ".attempts"
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        original = marker.read_bytes()
+        for field in ("agent_id", "project_id", "job_id"):
+            value = json.loads(original)
+            value[field] = str(uuid.uuid4())
+            marker.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError, "^attempt_state_invalid$"):
+                self.recorder()
+        marker.write_bytes(original)
+        other = self.recorder(configuration_id=str(uuid.uuid4()))
+        other.reserve_round(1)
+        with patch("apostille_local.workflow._MAX_ATTEMPT_STREAMS", 2):
+            third = self.recorder(configuration_id=str(uuid.uuid4()))
+            with self.assertRaisesRegex(ValueError, "^attempt_state_full$"):
+                third.reserve_round(1)
+        marker.write_bytes(b"x" * (64 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, "^attempt_state_invalid$"):
+            self.recorder()
+
+    def test_concurrent_attempt_reservation_has_one_winner(self):
+        first, second = self.recorder(), self.recorder()
+        def attempt(recorder):
+            try:
+                recorder.reserve_round(1)
+                return "reserved"
+            except ValueError:
+                return "rejected"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(sorted(pool.map(attempt, (first, second))), ["rejected", "reserved"])
+
+    def test_published_cleanup_failure_is_ready_and_readable_until_recovered(self):
+        for failure in ("receipt.json", "event.json", "directory"):
+            with self.subTest(failure=failure):
+                # Separate archive each time; same independently pinned context.
+                recorder = self.recorder(archive_directory=self.root / ("cleanup-" + failure))
+                original_unlink, original_rmdir = Path.unlink, Path.rmdir
+                def unlink(path, *args, **kwargs):
+                    if path.name == failure and path.parent.name.startswith(".apostille-workflow-"):
+                        raise PermissionError("PRIVATE_CLEANUP_MARKER")
+                    return original_unlink(path, *args, **kwargs)
+                def rmdir(path):
+                    if failure == "directory" and path.name.startswith(".apostille-workflow-"):
+                        raise PermissionError("PRIVATE_CLEANUP_MARKER")
+                    return original_rmdir(path)
+                with patch.object(Path, "unlink", unlink), patch.object(Path, "rmdir", rmdir):
+                    outcome = recorder.record("work_completed", round=1)
+                    self.assertEqual((outcome.status, outcome.warning), ("ready", "cleanup_pending"))
+                    self.assertIsNone(outcome.error)
+                    self.assertTrue(outcome.receipt_path.exists())
+                    self.assertNotIn("PRIVATE", repr(outcome))
+                    resumed = self.recorder(archive_directory=recorder.archive_directory)
+                    self.assertEqual(resumed.latest_round, 1)
+                    self.assertEqual(resumed.record("work_completed", round=1).error, "round_already_recorded")
+                recovered = self.recorder(archive_directory=recorder.archive_directory)
+                self.assertEqual(recovered.latest_round, 1)
+                self.assertEqual(outcome.receipt_path.stat().st_nlink, 1)
+                self.assertEqual(list(recovered.archive_directory.glob(".apostille-workflow-*")), [])
+
+    def test_cleanup_bound_stops_writes_without_blocking_published_receipt_reads(self):
+        recorder = self.recorder()
+        original = Path.unlink
+        def unlink(path, *args, **kwargs):
+            if path.name == "receipt.json" and path.parent.name.startswith(".apostille-workflow-"):
+                raise PermissionError("synthetic cleanup failure")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "unlink", unlink), patch("apostille_local.workflow._MAX_RECOVERY_STAGES", 1):
+            first = recorder.record("work_completed", round=1)
+            self.assertEqual((first.status, first.warning), ("ready", "cleanup_pending"))
+            second = recorder.record("work_completed", round=2)
+            self.assertEqual((second.status, second.error), ("failed", "cleanup_required"))
+            self.assertEqual(self.recorder().latest_round, 1)
+            self.assertEqual(len(list(recorder.archive_directory.glob("*.json"))), 1)
+        resumed = self.recorder()
+        self.assertEqual(resumed.record("work_completed", round=2).status, "ready")
+
+    def test_named_staging_recovery_requires_matching_event_and_verified_publication(self):
+        recorder = self.recorder()
+        first = recorder.record("work_completed", round=1)
+        original_receipt = first.receipt_path.read_bytes()
+        original_event = json.loads(original_receipt)["event"]
+        pending = recorder.archive_directory / f".apostille-workflow-{first.event_id}"
+        pending.mkdir(mode=0o700)
+        staged_event = pending / "event.json"
+        altered = original_event | {"model_id": str(uuid.uuid4())}
+        staged_event.write_text(json.dumps(altered))
+        staged_event.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "^archive_invalid$"):
+            self.recorder()
+        self.assertTrue(staged_event.exists())
+        self.assertEqual(first.receipt_path.read_bytes(), original_receipt)
+        # Matching metadata alone is insufficient when independent verification
+        # rejects the purported committed receipt.
+        staged_event.write_text(json.dumps(original_event))
+        invalid = json.loads(original_receipt)
+        invalid["bundle"]["test_verified"] = False
+        first.receipt_path.write_text(json.dumps(invalid))
+        with self.assertRaisesRegex(ValueError, "^archive_invalid$"):
+            self.recorder()
+        self.assertTrue(staged_event.exists())
+        first.receipt_path.write_bytes(original_receipt)
+        self.assertEqual(self.recorder().latest_round, 1)
+        self.assertFalse(pending.exists())
+
+    def test_postpublication_sync_failure_does_not_remove_committed_receipt(self):
+        recorder = self.recorder()
+        with patch.object(recorder, "_sync_directory", side_effect=OSError("PRIVATE_SYNC_MARKER")):
+            outcome = recorder.record("work_completed", round=1)
+        self.assertEqual((outcome.status, outcome.warning), ("ready", "durability_uncertain"))
+        self.assertTrue(outcome.receipt_path.exists())
+        self.assertEqual(self.recorder().latest_round, 1)
+        self.assertNotIn("PRIVATE", repr(outcome))
 
     def test_timeout_is_bounded_and_reports_fixed_code(self):
         recorder = self.recorder(timeout=0.2)

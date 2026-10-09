@@ -72,9 +72,11 @@ change the signing contract; neither is an industry-trained model.
 ## What the adapter records
 
 - `Participant.wrap` records `work_completed` only after a successful train
-  callback returns a finite model and a reply for that request. Exceptions and
-  cancellation become fixed error reasons and separate `work_failed` or
-  `work_cancelled` receipts. It never serializes callback arguments or results.
+  callback returns a finite model and a reply for that request. Ordinary errors
+  produce fixed error replies and `work_failed` receipts. Cancellation writes
+  `work_cancelled` best-effort and re-raises the original interrupt/cancellation;
+  it never becomes a normal reply that permits another round to run. The adapter
+  never serializes callback arguments or results.
 - `EvidenceFedAvg` calls Flower's implementation for aggregation. It requires all
   expected nodes exactly once, the current round, matching run/request/task routing,
   no error replies, and a finite
@@ -83,8 +85,9 @@ change the signing contract; neither is an industry-trained model.
   can print their potentially sensitive `reason` text.
 - Signature status is independent of computation status. Read `last_receipt` after
   each hook. A signing failure preserves a completed result and does not repeat
-  training or claim to undo it. The demo blocks release if any required receipt
-  was not produced.
+  training or claim to undo it. Check `last_receipt.warning` as well: a committed
+  receipt can be ready with a fixed cleanup/durability warning. The demo blocks
+  release if any required receipt was not produced.
 - Configuration approval, model release and deployment acceptance are explicit
   caller decisions. Successful aggregation does not automatically approve a
   release. The demo uses distinct approver, coordinator, deployer and site keys.
@@ -109,17 +112,31 @@ bin/apostille-workflow verify-set \
   --policy "$DEMO_PARENT/pharma/receiver-policy.json"
 ```
 
-The wrapper checks the verified archive's latest terminal round before running a
-callback. Old/skipped rounds and changed configuration identifiers are rejected.
-The in-memory guard also consumes a failed attempt even if its signing failed.
-Use one training owner for each job/site and its archive. The archive lock protects
-receipt operations; it does not hold a distributed lock around training.
+Before a callback or coordinator dispatch, the wrapper calls the recorder's
+`reserve_round()` to persist a local attempt high-water mark under the archive
+lock. It combines signed rounds with prior unsigned reservations, rejects old or
+skipped rounds and mismatched configuration IDs, and consumes the next round
+before running work. The private `.attempts`/`.attempts.pending` operational files
+are bounded and remain inside the archive; include them in local backups, not in
+receipt exports. Valid interrupted pending writes are conservatively consumed.
+A corrupt or foreign marker blocks work.
 
-A crash **after training but before signing** leaves no receipt. An archive cannot
-prove that training did not happen. Resume decisions require the training
-framework's own durable checkpoint and scheduler, not automatic retries based on
-missing receipts. Do not share one adapter instance across unrelated jobs. The
-in-process demo refuses an existing output directory and implements no resumption.
+After a signing failure and process restart, that attempted round stays consumed;
+an explicitly requested next round is possible. This does **not** choose or
+supply the model checkpoint for resumption. A crash after reservation may have
+occurred before, during or after training. The framework/operator must reconcile
+its durable checkpoint and scheduler before supplying the next round and model.
+Use one training owner per job/site. The archive lock is not a distributed lock
+held for the whole computation, and rollback/deletion of unsigned state cannot
+be detected. The adapter makes no exactly-once execution claim.
+
+A published receipt remains `ready` when post-publication cleanup fails. The SDK
+reports `cleanup_pending` or a durability warning and retries narrowly validated
+cleanup on later reads, without replaying training. Unknown/uncommitted staging
+still blocks resumption; see [recovery and backup details](../../docs/WORKFLOW_EVIDENCE.md#published-receipts-and-cleanup-recovery).
+Do not reset attempt state or infer that a missing receipt means nothing ran.
+The demo refuses an existing output directory and implements no automatic
+checkpoint resumption.
 
 The receipt describes what a key asserted about identifiers and completion.
 It does not prove computation happened, model quality, absence of poisoning,

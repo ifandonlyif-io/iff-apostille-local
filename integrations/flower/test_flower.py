@@ -3,6 +3,8 @@ from adapter import EvidenceFedAvg, Participant, RoundRejected
 from demo import InProcessNodes, cli_json, initialize_in_process_task, make_client, run_demo
 
 import contextlib
+import asyncio
+from concurrent.futures import CancelledError
 import io
 import json
 import os
@@ -26,12 +28,18 @@ class RecorderSpy:
     def __init__(self, status="ready", raises=False):
         self.configuration_id = "approved"
         self.events = []
+        self.attempted = 0
         self.status = status
         self.raises = raises
 
     @property
     def latest_round(self):
         return max((server_round for _, server_round in self.events), default=0) if self.status == "ready" else 0
+
+    def reserve_round(self, round):
+        if round != max(self.attempted, self.latest_round) + 1:
+            raise ValueError("round_rejected")
+        self.attempted = round
 
     def record(self, event_type, *, round):
         self.events.append((event_type, round))
@@ -104,20 +112,71 @@ class AdapterTests(unittest.TestCase):
                     callback(request(), context())
                 self.assertEqual(calls, [1])
 
-    def test_exception_and_interrupt_record_fixed_failed_or_cancelled(self):
-        for exception, event in ((RuntimeError("PRIVATE_TRAINING_MARKER"), "work_failed"),
-                                 (KeyboardInterrupt("PRIVATE_TRAINING_MARKER"), "work_cancelled")):
-            with self.subTest(event=event):
-                spy = RecorderSpy()
-                participant = Participant(spy, "approved", allow_in_process_messages=True)
-                def train(message, context):
-                    raise exception
-                out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    result = participant.wrap(train)(request(), context())
-                self.assertTrue(result.has_error())
-                self.assertNotIn("PRIVATE", result.error.reason + out.getvalue() + err.getvalue())
-                self.assertEqual(spy.events, [(event, 1)])
+    def test_exception_records_fixed_failure_without_private_error(self):
+        spy = RecorderSpy()
+        participant = Participant(spy, "approved", allow_in_process_messages=True)
+        def train(message, context):
+            raise RuntimeError("PRIVATE_TRAINING_MARKER")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = participant.wrap(train)(request(), context())
+        self.assertTrue(result.has_error())
+        self.assertNotIn("PRIVATE", result.error.reason + out.getvalue() + err.getvalue())
+        self.assertEqual(spy.events, [("work_failed", 1)])
+
+    def test_cancellation_is_recorded_then_original_propagates(self):
+        for kind in (KeyboardInterrupt, asyncio.CancelledError, CancelledError):
+            for signing in ("ready", "failed"):
+                with self.subTest(kind=kind, signing=signing):
+                    original = kind("PRIVATE_CANCELLATION_MARKER")
+                    spy = RecorderSpy(signing)
+                    participant = Participant(spy, "approved", allow_in_process_messages=True)
+                    calls = []
+                    def train(message, context):
+                        calls.append(1)
+                        raise original
+                    callback = participant.wrap(train)
+                    with self.assertRaises(kind) as caught:
+                        callback(request(), context())
+                    self.assertIs(caught.exception, original)
+                    self.assertEqual(calls, [1])
+                    self.assertEqual(spy.events, [("work_cancelled", 1)])
+                    self.assertEqual(participant.last_receipt.status, signing)
+                    with self.assertRaises(RoundRejected):
+                        callback(request(), context())
+                    self.assertEqual(calls, [1])
+
+    def test_second_interrupt_while_signing_does_not_replace_original(self):
+        spy = RecorderSpy()
+        participant = Participant(spy, "approved", allow_in_process_messages=True)
+        original = KeyboardInterrupt("first")
+        def train(message, context):
+            raise original
+        with patch.object(spy, "record", side_effect=KeyboardInterrupt("second")):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                participant.wrap(train)(request(), context())
+        self.assertIs(caught.exception, original)
+        self.assertEqual(participant.last_receipt.status, "failed")
+
+    def test_aggregation_and_dispatch_cancellation_propagate(self):
+        for kind in (KeyboardInterrupt, asyncio.CancelledError, CancelledError):
+            with self.subTest(kind=kind):
+                spy, strategy, replies = self.strategy()
+                original = kind("PRIVATE_CANCELLATION_MARKER")
+                with patch.object(FedAvg, "aggregate_train", side_effect=original):
+                    with self.assertRaises(kind) as caught:
+                        strategy.aggregate_train(1, replies)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(spy.events, [("work_cancelled", 1)])
+                self.assertEqual(strategy._expected_replies, {})
+                with self.assertRaises(RoundRejected):
+                    strategy.aggregate_train(1, replies)
+                # Dispatch also consumes its reservation before cancellation.
+                with patch.object(FedAvg, "configure_train", side_effect=original):
+                    with self.assertRaises(kind) as caught:
+                        strategy.configure_train(2, ArrayRecord([np.zeros(3)]), ConfigRecord(), InProcessNodes())
+                self.assertIs(caught.exception, original)
+                self.assertEqual(spy.events[-1], ("work_cancelled", 2))
 
     def test_stale_wrong_config_and_skipped_rounds_never_execute(self):
         spy = RecorderSpy()
@@ -328,6 +387,61 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(calls, [1])
             self.assertEqual(recorder.latest_round, 4)
 
+    def test_missing_signature_does_not_allow_restart_replay_or_stall_next_round(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "demo"
+            run_demo(self.executable, output, "manufacturing")
+            for role in ("site-1", "coordinator"):
+                with self.subTest(role=role):
+                    archive = output / role / "receipts"
+                    event = json.loads(next(archive.glob("*.json")).read_text())["event"]
+                    key = output / role / "synthetic-key.seed"
+                    arguments = dict(executable=self.executable, archive_directory=archive,
+                        key_file=key, policy_path=output / "receiver-policy.json",
+                        **{field: event[field] for field in ("agent_id", "project_id", "job_id",
+                            "configuration_id", "model_id", "framework", "framework_version")})
+                    configuration = event["configuration_id"]
+                    recorder = WorkflowRecorder(**arguments)
+                    original_key = key.read_bytes()
+                    key.write_bytes(b"invalid-synthetic-signing-key")
+                    if role == "site-1":
+                        adapter = Participant(recorder, configuration, allow_in_process_messages=True)
+                        result = adapter.wrap(lambda message, _: response(message))(
+                            request(server_round=4, configuration_id=configuration), context())
+                        self.assertFalse(result.has_error())
+                    else:
+                        adapter = EvidenceFedAvg(recorder, configuration, (1, 2, 3), allow_in_process_messages=True)
+                        messages = adapter.configure_train(4, ArrayRecord([np.zeros(3)]), ConfigRecord(), InProcessNodes())
+                        result, _ = adapter.aggregate_train(4, [response(m) for m in messages])
+                        self.assertIsNotNone(result)
+                    self.assertEqual(adapter.last_receipt.status, "failed")
+                    key.write_bytes(original_key)
+                    restarted = WorkflowRecorder(**arguments)
+                    self.assertEqual(restarted.latest_round, 3)
+                    if role == "site-1":
+                        resumed = Participant(restarted, configuration, allow_in_process_messages=True)
+                        calls = []
+                        def train(message, context):
+                            calls.append(1)
+                            return response(message)
+                        callback = resumed.wrap(train)
+                        with self.assertRaises(RoundRejected):
+                            callback(request(server_round=4, configuration_id=configuration), context())
+                        self.assertEqual(calls, [])
+                        callback(request(server_round=5, configuration_id=configuration), context())
+                        self.assertEqual(calls, [1])
+                    else:
+                        resumed = EvidenceFedAvg(restarted, configuration, (1, 2, 3), allow_in_process_messages=True)
+                        with self.assertRaises(RoundRejected):
+                            resumed.configure_train(4, ArrayRecord([np.zeros(3)]), ConfigRecord(), InProcessNodes())
+                        messages = resumed.configure_train(5, ArrayRecord([np.zeros(3)]), ConfigRecord(), InProcessNodes())
+                        result, _ = resumed.aggregate_train(5, [response(m) for m in messages])
+                        self.assertIsNotNone(result)
+                    self.assertEqual(resumed.last_receipt.status, "ready")
+                    self.assertEqual(restarted.latest_round, 5)
+                    rounds = {json.loads(path.read_text())["event"]["round"] for path in archive.glob("*.json")}
+                    self.assertEqual(rounds, {"1", "2", "3", "5"})
+
     def test_failed_and_cancelled_real_clients_never_export_success_or_error_contents(self):
         marker = "PRIVATE_TRAINING_MARKER_NEVER_EXPORT"
         for exception, kind in ((RuntimeError(marker), "work_failed"),
@@ -342,7 +456,8 @@ class EndToEndTests(unittest.TestCase):
                         raise exception
                     return app, context(node_id)
                 with patch("demo.make_client", side_effect=failing_client):
-                    with self.assertRaisesRegex(RuntimeError, "training_round_failed"):
+                    expected = KeyboardInterrupt if kind == "work_cancelled" else RuntimeError
+                    with self.assertRaises(expected):
                         run_demo(self.executable, output, "manufacturing", True)
                 events = []
                 for path in output.rglob("*"):
@@ -351,7 +466,7 @@ class EndToEndTests(unittest.TestCase):
                     if path.parent.name == "receipts" and path.suffix == ".json":
                         events.append(json.loads(path.read_text())["event"])
                 self.assertEqual(sum(e["event_type"] == kind for e in events),
-                                 4 if kind == "work_failed" else 3)
+                                 4 if kind == "work_failed" else 1)
                 self.assertNotIn("work_completed", {e["event_type"] for e in events})
                 self.assertFalse((output / "synthetic-model.npy").exists())
 

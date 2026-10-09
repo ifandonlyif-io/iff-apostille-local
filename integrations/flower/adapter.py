@@ -89,15 +89,22 @@ class _ReplyExpectation:
                 and (client_task is None or meta.src_task_id == client_task))
 
 
-def _latest_round(recorder: WorkflowRecorder, configuration_id: str) -> int:
+def _reserve_round(recorder: WorkflowRecorder, configuration_id: str, server_round: int) -> None:
     try:
         _configuration_matches(recorder, configuration_id)
-        latest = recorder.latest_round
-        if type(latest) is not int or latest < 0:
-            raise ValueError("invalid_round")
-        return latest
+        recorder.reserve_round(server_round)
     except Exception:
-        raise RoundRejected("receipt_archive_invalid") from None
+        raise RoundRejected("round_rejected") from None
+
+
+def _record_cancellation(recorder: WorkflowRecorder, server_round: int,
+                         configuration_id: str) -> ReceiptOutcome:
+    # Preserve the original cancellation even if another interrupt occurs while
+    # the best-effort receipt is being written.
+    try:
+        return _record(recorder, "work_cancelled", server_round, configuration_id)
+    except BaseException:
+        return ReceiptOutcome("failed", None, "", "signing_failed")
 
 
 def _valid_arrays(arrays: ArrayRecord) -> bool:
@@ -110,7 +117,7 @@ class Participant:
     """Wrap a real ClientApp train callback for one job/participant.
 
     Return values are untouched on success, including when signing fails.
-    Failures become Flower Error messages with fixed reasons. Inspect last_receipt
+    Failures become fixed Flower errors; cancellation is recorded then re-raised. Inspect last_receipt
     separately; it does not authorize retrying training. Use one instance per job.
     """
 
@@ -121,28 +128,25 @@ class Participant:
         self.configuration_id = configuration_id
         self.allow_in_process_messages = allow_in_process_messages
         self.last_receipt: ReceiptOutcome | None = None
-        self._last_round = 0
         self._lock = threading.Lock()
 
     def wrap(self, train: Callable[[Message, Context], Message]) -> Callable[[Message, Context], Message]:
         def wrapped(message: Message, context: Context) -> Message:
             with self._lock:
-                self._last_round = max(self._last_round, _latest_round(self.recorder, self.configuration_id))
                 try:
                     config = message.content.config_records["config"]
                     server_round = config["server-round"]
                     approved = config["configuration-id"] == self.configuration_id
                 except (KeyError, TypeError, ValueError):
                     raise RoundRejected("round_rejected") from None
-                if (type(server_round) is not int or server_round != self._last_round + 1
+                if (type(server_round) is not int or server_round <= 0
                         or not approved or message.metadata.group_id != str(server_round)
                         or message.metadata.dst_node_id != context.node_id
                         or message.metadata.run_id != context.run_id
                         or (not self.allow_in_process_messages and not message.metadata.message_id)):
                     raise RoundRejected("round_rejected")
-                # Consume before executing. A failed/cancelled attempt cannot be
-                # replayed with fresh event IDs to produce another success receipt.
-                self._last_round = server_round
+                # Persist the attempt before executing, separately from signing.
+                _reserve_round(self.recorder, self.configuration_id, server_round)
                 expected = _ReplyExpectation.capture(message)
                 try:
                     result = train(message, context)
@@ -155,8 +159,8 @@ class Participant:
                     if len(arrays) != 1 or not _valid_arrays(next(iter(arrays.values()))):
                         raise ValueError("invalid_training_result")
                 except (KeyboardInterrupt, asyncio.CancelledError, CancelledError):
-                    self.last_receipt = _record(self.recorder, "work_cancelled", server_round, self.configuration_id)
-                    return Message(error=Error(2, "training_cancelled"), reply_to=message)
+                    self.last_receipt = _record_cancellation(self.recorder, server_round, self.configuration_id)
+                    raise
                 except Exception:
                     self.last_receipt = _record(self.recorder, "work_failed", server_round, self.configuration_id)
                     return Message(error=Error(1, "training_failed"), reply_to=message)
@@ -186,7 +190,6 @@ class EvidenceFedAvg(FedAvg):
         self.configuration_id = configuration_id
         self.allow_in_process_messages = allow_in_process_messages
         self.last_receipt: ReceiptOutcome | None = None
-        self._last_round = 0
         self._pending_round: int | None = None
         self._expected_replies: dict[int, _ReplyExpectation] = {}
         self._lock = threading.Lock()
@@ -194,8 +197,7 @@ class EvidenceFedAvg(FedAvg):
     def configure_train(self, server_round: int, arrays: ArrayRecord,
                         config: ConfigRecord, grid) -> Iterable[Message]:
         with self._lock:
-            self._last_round = max(self._last_round, _latest_round(self.recorder, self.configuration_id))
-            if (type(server_round) is not int or server_round != self._last_round + 1
+            if (type(server_round) is not int or server_round <= 0
                     or self._pending_round is not None):
                 raise RoundRejected("round_rejected")
             if set(grid.get_node_ids()) != self.expected_node_ids:
@@ -204,7 +206,15 @@ class EvidenceFedAvg(FedAvg):
             # configure_train has handed messages to a transport.
             outgoing = ConfigRecord(dict(config))
             outgoing["configuration-id"] = self.configuration_id
-            messages = list(super().configure_train(server_round, arrays, outgoing, grid))
+            _reserve_round(self.recorder, self.configuration_id, server_round)
+            try:
+                messages = list(super().configure_train(server_round, arrays, outgoing, grid))
+            except (KeyboardInterrupt, asyncio.CancelledError, CancelledError):
+                self.last_receipt = _record_cancellation(self.recorder, server_round, self.configuration_id)
+                raise
+            except Exception:
+                self.last_receipt = _record(self.recorder, "work_failed", server_round, self.configuration_id)
+                raise
             for message in messages:
                 message.metadata.group_id = str(server_round)
             self._expected_replies = {message.metadata.dst_node_id: _ReplyExpectation.capture(message)
@@ -218,7 +228,6 @@ class EvidenceFedAvg(FedAvg):
             if self._pending_round != server_round or type(server_round) is not int:
                 raise RoundRejected("round_rejected")
             self._pending_round = None
-            self._last_round = server_round
             try:
                 replies = list(replies)
                 # Reject errors before calling FedAvg: its default error logger
@@ -232,10 +241,12 @@ class EvidenceFedAvg(FedAvg):
                 if arrays is None or not _valid_arrays(arrays):
                     raise ValueError("missing_aggregate")
             except (KeyboardInterrupt, asyncio.CancelledError, CancelledError):
-                self.last_receipt = _record(self.recorder, "work_cancelled", server_round, self.configuration_id)
-                return None, None
+                self.last_receipt = _record_cancellation(self.recorder, server_round, self.configuration_id)
+                raise
             except Exception:
                 self.last_receipt = _record(self.recorder, "work_failed", server_round, self.configuration_id)
                 return None, None
+            finally:
+                self._expected_replies.clear()
             self.last_receipt = _record(self.recorder, "work_completed", server_round, self.configuration_id)
             return arrays, metrics

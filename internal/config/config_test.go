@@ -58,13 +58,14 @@ func TestModelProjectAndCredentialIsolation(t *testing.T) {
 			p.ID = "project-b"
 			c.Projects = append(c.Projects, p)
 		},
-		"unknown active model":    func(c *Config) { c.ActiveModel = "unknown" },
-		"unknown project model":   func(c *Config) { c.Projects[0].Models = []string{"unknown"} },
-		"empty project models":    func(c *Config) { c.Projects[0].Models = nil },
-		"invalid project key":     func(c *Config) { c.Projects[0].APIKeySHA256 = "synthetic-token" },
-		"invalid project ID":      func(c *Config) { c.Projects[0].ID = "../project-a" },
-		"unknown tool parser":     func(c *Config) { c.Models[0].ToolCallParser = "custom_plugin.py" },
-		"unknown runtime profile": func(c *Config) { c.Models[0].RuntimeProfile = "arbitrary-backend" },
+		"unknown active model":        func(c *Config) { c.ActiveModel = "unknown" },
+		"unknown project model":       func(c *Config) { c.Projects[0].Models = []string{"unknown"} },
+		"empty project models":        func(c *Config) { c.Projects[0].Models = nil },
+		"invalid project key":         func(c *Config) { c.Projects[0].APIKeySHA256 = "synthetic-token" },
+		"invalid project ID":          func(c *Config) { c.Projects[0].ID = "../project-a" },
+		"unknown tool parser":         func(c *Config) { c.Models[0].ToolCallParser = "custom_plugin.py" },
+		"tool parser without adapter": func(c *Config) { c.Models[0].ToolCallParser = "hermes" },
+		"unknown runtime profile":     func(c *Config) { c.Models[0].RuntimeProfile = "arbitrary-backend" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := validConfig()
@@ -84,9 +85,10 @@ func TestModelProjectAndCredentialIsolation(t *testing.T) {
 }
 
 func TestToolParserIsExplicitAndBounded(t *testing.T) {
-	for _, parser := range []string{"", "hermes"} {
+	for _, pair := range [][2]string{{"", ""}, {"", "vllm-chat-v1"}, {"hermes", "vllm-chat-v1"}} {
 		c := validConfig()
-		c.Models[0].ToolCallParser = parser
+		c.Models[0].ToolCallParser = pair[0]
+		c.Models[0].RuntimeProfile = pair[1]
 		if err := c.Validate(); err != nil {
 			t.Fatal(err)
 		}

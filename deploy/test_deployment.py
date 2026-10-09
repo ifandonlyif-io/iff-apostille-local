@@ -67,7 +67,7 @@ class RuntimeBoundaryTests(unittest.TestCase):
 
     def test_tool_parser_must_be_explicit_pinned_and_allowlisted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config, bundle, _ = self.fixture(tmp, "hermes")
+            config, bundle, _ = self.fixture(tmp, "hermes", "vllm-chat-v1")
             args = launcher.command(launcher.validate(config, bundle), bundle)
             self.assertIn("--enable-auto-tool-choice", args)
             self.assertEqual(args[args.index("--tool-call-parser") + 1], "hermes")
@@ -83,6 +83,53 @@ class RuntimeBoundaryTests(unittest.TestCase):
                 launcher.validate(config, bundle)
             with self.assertRaisesRegex(ValueError, "unsupported_tool_call_parser"):
                 launcher.command(model, bundle)
+
+    def test_tool_parser_requires_named_call_runtime_profile(self):
+        for profile in (None, ""):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
+                config, bundle, model = self.fixture(tmp, "hermes", profile)
+                with self.assertRaisesRegex(ValueError, "tool_parser_requires_vllm_profile"):
+                    launcher.validate(config, bundle)
+                with self.assertRaisesRegex(ValueError, "tool_parser_requires_vllm_profile"):
+                    launcher.command(model, bundle)
+
+    def test_only_explicit_empty_optional_fields_are_normalized(self):
+        for field in ("tool_call_parser", "runtime_profile"):
+            for changed_side in ("catalog", "manifest"):
+                with self.subTest(field=field, side=changed_side), tempfile.TemporaryDirectory() as tmp:
+                    config, bundle, model = self.fixture(tmp)
+                    if changed_side == "catalog":
+                        model[field] = ""
+                    else:
+                        manifest_path = bundle / "manifest.json"
+                        manifest = json.loads(manifest_path.read_bytes())
+                        manifest["model"][field] = ""
+                        raw = json.dumps(manifest).encode()
+                        manifest_path.write_bytes(raw)
+                        model["manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+                    config.write_text(json.dumps(dict(active_model="synthetic", models=[model])))
+                    self.assertEqual(launcher.validate(config, bundle), model)
+        for field, value in (("runtime_profile", None), ("tool_call_parser", None),
+                             ("unknown_option", ""), ("max_context", 8192)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                config, bundle, model = self.fixture(tmp)
+                model[field] = value
+                config.write_text(json.dumps(dict(active_model="synthetic", models=[model])))
+                with self.assertRaises(ValueError):
+                    launcher.validate(config, bundle)
+        # Unknown fields on both sides must not become valid merely by matching.
+        with tempfile.TemporaryDirectory() as tmp:
+            config, bundle, model = self.fixture(tmp)
+            model["unknown_option"] = ""
+            manifest_path = bundle / "manifest.json"
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest["model"]["unknown_option"] = ""
+            raw = json.dumps(manifest).encode()
+            manifest_path.write_bytes(raw)
+            model["manifest_sha256"] = hashlib.sha256(raw).hexdigest()
+            config.write_text(json.dumps(dict(active_model="synthetic", models=[model])))
+            with self.assertRaisesRegex(ValueError, "model_metadata_mismatch"):
+                launcher.validate(config, bundle)
 
     def test_runtime_profile_is_allowlisted_and_pinned_with_assets(self):
         with tempfile.TemporaryDirectory() as tmp:

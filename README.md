@@ -47,7 +47,7 @@ receivers need independently supplied exact key pins for trust.
    [Flower CPU example](integrations/flower/README.md). These use a separate
    event profile and archive; the gateway does not become a training service.
 
-The repository requires Go 1.25+ (toolchain pinned by `go.mod`). For SDK work:
+The repository requires Go 1.26.9+ (minimum patched toolchain in `go.mod`). For SDK work:
 
 ```sh
 python3 -m venv .venv

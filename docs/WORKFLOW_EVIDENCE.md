@@ -145,10 +145,16 @@ recorder = WorkflowRecorder(
     framework="generic",
     framework_version="1.0.0",
 )
+# Persist this attempt before calling training/dispatch, using the round and
+# model state explicitly selected by the framework's checkpoint/scheduler.
+recorder.reserve_round(1)
+# ... perform the training operation once ...
 receipt = recorder.record("work_completed", round=1)
 # Training result and receipt.status are separate outcomes.
 if receipt.status == "failed":
     notify_operator_of_receipt_failure(receipt.error)
+elif receipt.warning is not None:
+    notify_operator_of_published_receipt_warning(receipt.warning)
 ```
 
 Use a separate archive per project/job/agent, owned by the process user with
@@ -161,24 +167,75 @@ HTTP authorization service.
 
 Signing errors have fixed error codes; arbitrary backend errors and CLI stderr
 are not recorded. An unsuccessful receipt operation must not trigger a retry
-of training that already finished. Interrupted signing must be investigated by
-validating the archive before deciding whether another receipt is needed.
+of training that already finished. `record()` never executes training; a caller
+may reconcile a missing receipt for an already completed operation without
+reserving or running the operation again.
 
-Staging uses a private `.apostille-workflow-*` subdirectory inside the archive,
-so publication works when the archive itself is a mounted filesystem. A leftover
-staging directory after a process crash stops the recorder from resuming. Stop
-all writers, verify the committed `.json` receipts with `verify-set`, inspect
-the staged event/receipt with the offline verifier if present, and decide how to
-reconcile it with the framework's checkpoint. Do not automatically publish the
-staged file or repeat training. Once the incident is resolved, remove only the
-abandoned staging directory and resume under the same policy. Individual CLI
+### Durable local attempt guard
+
+Flower calls `reserve_round()` before a participant callback or coordinator
+dispatch. Under the same archive lock, it checks both verified signed rounds
+and a separate unsigned attempt high-water mark, then durably consumes the next
+round. The marker contains only project/job/agent and bounded
+configuration/model/framework round counters. It contains no inputs, updates,
+keys, paths or error text. There are at most 128 streams and 64 KiB of state.
+
+The fixed private files `.attempts` and `.attempts.pending` live **inside** the
+archive so mounted archives and backups retain the operational state. Writes
+use an exclusive pending file, file synchronization, atomic replacement and
+directory synchronization. A valid context-matching pending reservation left by
+an interrupted write is conservatively consumed on recovery, even when training
+never started. Malformed, foreign, symlinked or unsafe state fails closed.
+Go verification ignores these non-JSON operational files; they are never signed
+events or part of a receipt export. Back up and restore the **whole local archive**,
+including these files, separately from exporting just the signed `.json` files.
+
+If round 1 ran but signing failed, a restarted adapter rejects round 1 and can
+accept an explicitly supplied round 2. It does not synthesize a round-1 receipt
+or choose the model/checkpoint for round 2. The framework/operator must first
+reconcile what ran and select the recovery state. `latest_round` reports only
+verified signed terminal rounds, not reservations. Do not use missing signatures
+to decide that training did not happen, delete/reset attempt markers to reopen
+work, or share the archive across unrelated jobs.
+
+The adapter assumes one training owner per participant/job. Locks serialize
+reservations and receipt operations, not long-running model execution. Concurrent
+owners could attempt different rounds; a durable framework scheduler/checkpoint
+is still required. Restoring stale backups or manually changing unsigned state
+can roll back its protection. This is not proof of execution or an exactly-once
+execution protocol. Cancellation is recorded best-effort and then the original
+`KeyboardInterrupt`, `asyncio.CancelledError` or `concurrent.futures.CancelledError`
+is re-raised, so a caller's run stops rather than treating cancellation as a
+normal partial-round result.
+
+### Published receipts and cleanup recovery
+
+Staging uses a private `.apostille-workflow-<event UUID>` subdirectory inside the
+archive. An exclusive hard link of a verified receipt into `<event UUID>.json`
+is the publication commit point; existing destinations are never overwritten.
+After that point the SDK returns `status="ready"` and the published path even
+if cleanup or synchronization fails. The optional fixed `warning` is
+`cleanup_pending`, `durability_uncertain`, or
+`cleanup_pending_durability_uncertain`. A durability warning means the valid file
+exists now but persistence across power loss was not confirmed. Resolve the I/O
+problem and verify the archive after restart; do not repeat training or publish
+a duplicate event because of the warning.
+
+The next locked read retries cleanup **only** for a UUID-named staging directory
+whose existing published receipt verifies under the independent receiver policy
+and matches the same agent/project/job/event. Any remaining staged receipt must
+be the exact same inode/hard link; any remaining event must match the published
+metadata. Such a recognized cleanup remnant remains readable if cleanup still
+fails. At most 32 committed cleanup remnants are retained; additional writes
+stop with `cleanup_required` until the I/O problem is resolved. Published
+receipts can still be verified individually or as a set.
+
+Unknown, uncommitted, mismatched or unsafe staging directories still stop SDK
+resumption. Stop all writers, verify committed `.json` files with `verify-set`,
+inspect any staged receipt separately, and reconcile with the framework's
+checkpoint. Resolve that incident before removing only its abandoned staging
+directory. Recovery never auto-publishes an uncommitted stage, and individual
 verification of a staged receipt does not establish that it was published.
-
-The adapter uses verified terminal rounds to reject old work before calling a
-training callback. It assumes a single training owner per participant/job;
-filesystem locks only serialize receipt writing. A crash after training and
-before receipt publication still requires the framework's own durable checkpoint.
-The integration does not promise exactly-once model execution.
 
 ## Export and offline verification
 

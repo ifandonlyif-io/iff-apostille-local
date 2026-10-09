@@ -7,18 +7,22 @@ python -m pip install ./sdk/python
 ```
 
 The distribution name is `apostille-local`; the import is `apostille_local`.
-There is no claim that this preview has been published to PyPI.
+The current Local preview is `0.1.0-alpha.2`; this Python package is `0.1.0a2`.
+There is no claim that this preview has been published to PyPI. Use the matching
+alpha.2 offline verifier for receipts with `finish_reason: tool_calls`; the
+original Local alpha.1 verifier rejects that finish reason. Apostille Core remains
+pinned to `v0.1.0-alpha.1`. See [release compatibility](../../docs/RELEASE.md).
 
 For an offline installation, first verify the approved preview bundle's
 `SHA256SUMS` through your artifact-transfer process, then install its locked
 dependencies and SDK wheel into a virtual environment:
 
 ```sh
-PREVIEW=./dist/0.1.0-alpha.1
+PREVIEW=./dist/0.1.0-alpha.2
 python -m pip install --no-index --find-links "$PREVIEW/wheelhouse" \
   --require-hashes -r "$PREVIEW/sdk/python/requirements-linux-py311.lock"
 python -m pip install --no-index --no-deps \
-  "$PREVIEW/python/apostille_local-0.1.0a1-py3-none-any.whl"
+  "$PREVIEW/python/apostille_local-0.1.0a2-py3-none-any.whl"
 ```
 
 The dependency lock targets Linux x86_64 / Python 3.11; the bundled dependency

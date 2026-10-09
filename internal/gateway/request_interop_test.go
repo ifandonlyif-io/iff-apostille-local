@@ -11,6 +11,7 @@ import (
 func interopModel() config.Model {
 	m := testConfig("http://runtime:8000").Active()
 	m.ToolCallParser = "hermes"
+	m.RuntimeProfile = "vllm-chat-v1"
 	return m
 }
 

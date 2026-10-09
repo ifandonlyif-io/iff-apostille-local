@@ -233,3 +233,70 @@ privacy, NVIDIA FLARE/OpenFL adapter or pharmaceutical validation was delivered.
 No model was activated in the inference gateway. Workflow archives have no
 automatic expiry; customers must define retention and access policy. Existing
 P1 deployment and P4 hardware gates remain open.
+
+## Pre-merge correctness review corrections — 2026-10-09
+
+This review concerns `codex/federated-workflow-evidence` in Apostille Local.
+It does not change the separate hosted service's post-quantum or key-rotation
+implementation. The seven pre-merge findings were handled as follows:
+
+1. **Cancellation:** participant callbacks and coordinator hooks write a
+   best-effort cancellation receipt, then re-raise the original interruption.
+   Receipt failure cannot convert cancellation into normal completion.
+2. **Restart after signing failure:** the recorder persists an unsigned local
+   round reservation before training or dispatch. The reserved round stays
+   consumed across process restarts even if signing fails. The framework must
+   still restore its own model checkpoint and explicitly choose the next round;
+   this operational state is not proof of execution.
+3. **Tool configuration:** `hermes` requires `vllm-chat-v1` in both Go config
+   validation and the Python launcher. Incomplete combinations fail before
+   serving tool-call capabilities.
+4. **Software identity:** Local gateway, OpenAPI, preview output and SDK move to
+   alpha.2 together. Core remains pinned at `v0.1.0-alpha.1`. Preview creation
+   reserves a fresh versioned directory before any builders run and refuses to
+   overwrite an earlier or incomplete output. Receiver compatibility is in
+   [RELEASE.md](RELEASE.md).
+5. **Receipt publication:** publication is the exclusive link operation. Later
+   cleanup or durability errors retain the published receipt and return a
+   warning with its path. Recovery accepts only correlated, independently
+   verified committed staging; unknown/uncommitted staging still fails closed.
+6. **Manifest compatibility:** Go's omission of empty optional parser/profile
+   fields and explicitly empty catalog strings compare equally in the launcher.
+   Unknown fields, nulls, type changes and meaningful setting differences remain
+   rejected. A cross-language regression uses actual Go `Prepare` output.
+7. **Admission limits:** global/project concurrency slots are acquired before
+   reading/parsing the body or compiling JSON Schemas, and released on every
+   terminal path. Saturated requests are rejected before body reads. This bounds
+   parallel validation work as well as inference.
+
+Coordinator reply references are cleared on terminal aggregation/cancellation
+paths as part of exception cleanup. The review's remaining archive-scan/SSE
+performance work, exact response-byte handling, unused helper cleanup and shared
+schema-compiler refactoring remain separate follow-up work. Hardware and
+multi-host/privacy acceptance gates are unchanged.
+
+The final security gate additionally reported ten reachable standard-library
+advisories with the previously selected Go 1.26.6. All specify Go 1.26.9 as the
+fix on the 1.26 line. The minimum Go version is now 1.26.9, including offline
+builds with `GOTOOLCHAIN=local`; Docker build-image guidance and notices were
+updated. External module versions and `go.sum` are unchanged. See the
+[official Go 1.26.9 release history](https://go.dev/doc/devel/release#go1.26.9)
+(released 2026-10-08) for the standard-library security update.
+
+Final validation with Go 1.26.9 passed:
+
+- `make check`: Go tests, race detector, vet, **63 SDK tests**, **13 real CLI
+  workflow tests**, **15 deployment tests**, **23 API-checker/release tests**,
+  both vendor Compose renders, native/OpenAI/LangChain TLS integration and all
+  four command builds.
+- `make flower-test`: **23 tests**, including original cancellation propagation,
+  signing failure followed by process reconstruction and explicit next-round
+  continuation, model binding and both synthetic scenarios.
+- `make security`: `govulncheck v1.1.4` reports no vulnerabilities.
+- OpenAPI 3.1 validation, CI workflow lint, local Markdown links and
+  `git diff --check` passed; `go mod tidy` left dependency versions/checksums
+  unchanged.
+
+The corrected local preview destination is `dist/0.1.0-alpha.2/`, with SDK
+`0.1.0a2`; prior alpha.1 destinations must remain intact. These are software
+checks, with no Docker/GPU service or multi-host deployment executed.
