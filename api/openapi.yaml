@@ -243,7 +243,7 @@ paths:
                     description: Gateway metadata assertion; no full-content binding claim.
                   bundle:
                     type: object
-                    description: Apostille Core 0.1 bundle; exact wire semantics come from the pinned Core dependency.
+                    description: Apostille Core bundle (Core 0.3 for an ML-DSA-65 key, Core 0.1 for an Ed25519 key); exact wire semantics come from the pinned Core dependency.
                   manifest_base64:
                     type: string
                     contentEncoding: base64
@@ -258,7 +258,7 @@ paths:
                     contentMediaType: application/json
                     description: >-
                       Present only when ready. Standard padded Base64 of the exact
-                      original Core 0.1 bundle bytes. Decode for offline verification.
+                      original Core bundle bytes (Core 0.1 or Core 0.3). Decode for offline verification.
                       Embedded keys are not independently selected trust pins.
         default:
           $ref: '#/components/responses/Error'

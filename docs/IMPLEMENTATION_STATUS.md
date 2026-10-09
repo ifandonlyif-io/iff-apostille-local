@@ -357,3 +357,26 @@ outside the repository with `anthropic==1.8.0`, `openai==2.29.0`):
 No hardware, Docker or real runtime was exercised; the integration runtime is
 synthetic. Anthropic SDK 1.8.0 has no `temperature`/`top_p`/`top_k` arguments,
 so the live test sends them through `extra_body`.
+
+## Core 0.3 post-quantum receipts by default - 2026-10-10
+
+- Apostille Core is now `v0.4.0-alpha.1` (Core 0.1 wire bytes unchanged, Core 0.3 /
+  ML-DSA-65 added). The Go directive is 1.27.2 and `make security` uses
+  `govulncheck` v1.8.0 (v1.1.4 panics on Go 1.27).
+- Signing key files are either an Apostille JSON key file (ML-DSA-65 or Ed25519,
+  parsed with `ParseKeyFile`) or the legacy raw 32-byte Ed25519 seed. Format is
+  decided by size (exactly 32 bytes is a seed; larger must be a valid JSON key
+  file); anything else is invalid. Owner-only permission, symlink and size checks
+  are unchanged and errors never include key material.
+- Records are signed in the key's natural version (ML-DSA-65 -> Core 0.3, Ed25519
+  -> Core 0.1) and `Bundle.protocol` matches the statement. `keygen` and every
+  documented key-creation path produce an ML-DSA-65 JSON key file.
+- Verification accepts Core 0.1 and Core 0.3 by default.
+  `--require-post-quantum` (`apostille-local-verify`, `apostille-workflow verify`
+  and `verify-set`), `evidence.require_post_quantum` in the gateway config and
+  `WorkflowRecorder(require_post_quantum=True)` accept only Core 0.3.
+- Output additions: `core_protocol` on single-record verification and a sorted
+  `core_protocols` array on `verify-set`. Mixed sets verify and list both versions.
+- Only Core 0.3 signatures are post-quantum. Producer-only signatures still prove
+  only a signed metadata assertion; Apostille Local is not a validated
+  pharmaceutical system.

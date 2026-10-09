@@ -55,7 +55,7 @@ fuzz:
 	go test ./internal/gateway -run='^$$' -fuzz=FuzzStrictJSON -fuzztime=30s
 
 security:
-	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
 # Local preview only; release artifacts still need the actual pinned runtime/model SBOM.
 preview:

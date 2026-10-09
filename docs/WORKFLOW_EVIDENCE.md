@@ -2,7 +2,10 @@
 
 Apostille workflow evidence is an optional, industry-neutral integration for
 customer-owned training and model-delivery workflows. It uses the released
-Apostille Core 0.1 producer-only bundle to sign a separate JSON event artifact.
+Apostille Core producer-only bundle to sign a separate JSON event artifact. A
+new key is ML-DSA-65 and signs Core 0.3 (post-quantum); an existing Ed25519 key
+signs Core 0.1 (classical, not post-quantum). Only the Core 0.3 signatures are
+post-quantum.
 It introduces no new Core protocol, hosted issuer, account, network service or
 inference API endpoint.
 
@@ -81,18 +84,22 @@ make build
 ```
 
 Create a dedicated signing key in a private directory. This command prints only
-the public fingerprint and agent ID; it never prints the seed:
+the public fingerprint and agent ID; it never prints the private key:
 
 ```sh
 umask 077
 mkdir workflow-private
 bin/apostille-workflow keygen \
-  --out-key workflow-private/participant.seed \
+  --out-key workflow-private/participant.json \
   --agent-id 00000000-0000-4000-8000-000000000001
 ```
 
-The private file is a raw 32-byte Ed25519 seed with mode 0600. It is supplied by
-path, not by environment, API argument or shell command-line secret. Preserve it
+The private file is an ML-DSA-65 Apostille JSON key file with mode 0600. It is
+supplied by path, not by environment, API argument or shell command-line secret.
+`--key-file` also accepts an existing Ed25519 Apostille JSON key file or the
+legacy raw 32-byte Ed25519 seed; those sign Core 0.1, which is classical, not
+post-quantum. Any other content is rejected without echoing it. Each receipt is
+signed in its key's version, and `Bundle.protocol` matches it. Preserve it
 across restarts; test/demo keys are not deployment credentials.
 
 The receiver selects a policy from an independent administrative channel:
@@ -135,7 +142,7 @@ from apostille_local.workflow import WorkflowRecorder
 recorder = WorkflowRecorder(
     executable="/opt/apostille/bin/apostille-workflow",
     archive_directory="/var/lib/apostille/participant-events",
-    key_file="/etc/apostille/participant.seed",
+    key_file="/etc/apostille/participant.json",
     policy_path="/etc/apostille/receiver-policy.json",
     agent_id=agent_id,
     project_id=project_id,
@@ -255,7 +262,20 @@ bin/apostille-workflow verify \
 # Check a complete supplied prefix of receipt sequences for a project/job.
 bin/apostille-workflow verify-set \
   --directory transferred-receipts --policy receiver-policy.json
+
+# Accept only Core 0.3 (ML-DSA-65); a Core 0.1 record is then rejected.
+bin/apostille-workflow verify-set --require-post-quantum \
+  --directory transferred-receipts --policy receiver-policy.json
 ```
+
+By default verification accepts Core 0.1 and Core 0.3. `verify` reports the
+record's version as `core_protocol`; `verify-set` reports every distinct version
+found as the sorted `core_protocols` list, so a set that mixes Core 0.1 and Core
+0.3 records verifies and lists both. `--require-post-quantum` (on `verify` and
+`verify-set`) accepts only Core 0.3 and rejects anything else. Only Core 0.3
+signatures are post-quantum; a set that verifies by default may still contain
+classical Core 0.1 signatures. The Python recorder exposes the same switch as
+`WorkflowRecorder(..., require_post_quantum=True)`.
 
 Verification reads local regular files only, makes no network requests, and
 rejects cross-project/job events, wrong pins and unauthorized event types.

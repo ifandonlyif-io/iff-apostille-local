@@ -109,6 +109,12 @@ Verify the downloaded artifact with the independent local verifier:
   --producer-pin "$EXPECTED_PRODUCER_PIN"
 ```
 
+The verifier accepts Core 0.1 and Core 0.3 and reports the version as
+`core_protocol`. Add `--require-post-quantum` to accept only Core 0.3 (ML-DSA-65,
+post-quantum); a Core 0.1 receipt is then rejected. Only Core 0.3 signatures are
+post-quantum. The Python SDK performs no cryptography; for workflow receipts
+`WorkflowRecorder(..., require_post_quantum=True)` passes the same flag to the Go CLI.
+
 Provision `EXPECTED_PRODUCER_PIN` independently through the receiver's trusted
 channel; do not derive a trust pin from the API response. Downloading does not
 verify a signature. Successful verification establishes the signed metadata

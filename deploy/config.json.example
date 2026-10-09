@@ -28,6 +28,6 @@
       "max_concurrent": 1
     }
   ],
-  "evidence": {"directory": "", "key_file": "", "agent_id": ""},
+  "evidence": {"directory": "", "key_file": "", "agent_id": "", "require_post_quantum": false},
   "timeout_seconds": 120
 }

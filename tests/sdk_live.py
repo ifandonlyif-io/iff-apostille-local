@@ -49,7 +49,7 @@ def verify_download(files, run_id, *, negative_checks=False):
 
     def offline(path, pin):
         return subprocess.run(
-            [verifier, "--artifact", str(path), "--bundle", str(bundle), "--producer-pin", pin],
+            [verifier, "--artifact", str(path), "--bundle", str(bundle), "--producer-pin", pin, "--require-post-quantum"],
             capture_output=True, text=True, timeout=10, check=False,
         )
 
@@ -60,6 +60,7 @@ def verify_download(files, run_id, *, negative_checks=False):
     assert verified["producer_key_policy"] == "matched"
     assert verified["certificate_scope"] == "producer_only" and verified["issuer_trust"] == "unknown"
     assert verified["evidence_scope"] == "run_metadata_only" and verified["run_id"] == run_id
+    assert verified["core_protocol"] == "https://ifandonlyif.io/apostille/spec/0.3"
     if negative_checks:
         # Change one byte while preserving valid JSON and manifest field syntax;
         # this must fail because the artifact hash no longer matches the signature.

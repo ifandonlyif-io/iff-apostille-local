@@ -13,6 +13,8 @@ import uuid
 from apostille_local.workflow import WorkflowRecorder
 
 
+_CORE_01 = "https://ifandonlyif.io/apostille/spec/0.1"
+_CORE_03 = "https://ifandonlyif.io/apostille/spec/0.3"
 _EVENTS = ["configuration_approved", "work_completed", "work_failed", "work_cancelled",
            "model_released", "deployment_accepted"]
 
@@ -88,6 +90,57 @@ class WorkflowLiveTests(unittest.TestCase):
         after = {path.name: path.read_bytes() for path in recorder.archive_directory.glob("*.json")}
         self.assertEqual(before, after)
         self.assertEqual(self.recorder().record("work_completed", round=4).status, "ready")
+
+    def test_post_quantum_default_key_and_require_post_quantum_flag(self):
+        key_file = json.loads(self.key.read_text())
+        self.assertEqual(key_file["protocol"], _CORE_03)
+        recorder = self.recorder(require_post_quantum=True)
+        outcome = recorder.record("configuration_approved")
+        self.assertEqual(outcome.status, "ready", outcome.error)
+        bundle = json.loads(outcome.receipt_path.read_bytes())["bundle"]
+        self.assertEqual((bundle["protocol"], bundle["statement"]["protocol"]), (_CORE_03, _CORE_03))
+        verified = self.command("verify-set", "--directory", self.kwargs["archive_directory"],
+                                "--policy", self.policy)
+        self.assertEqual(verified["core_protocols"], [_CORE_03])
+        strict = self.command("verify", "--receipt", outcome.receipt_path, "--policy", self.policy,
+                              "--require-post-quantum")
+        self.assertEqual(strict["core_protocol"], _CORE_03)
+
+    def test_legacy_seed_mixes_with_post_quantum_and_strict_mode_rejects_it(self):
+        legacy = self.root / "legacy.seed"
+        legacy.write_bytes(bytes(range(32)))
+        legacy.chmod(0o600)
+        probe = self.root / "probe-event.json"
+        event = {"schema": "urn:apostille:workflow-event:0.1", "evidence_scope": "workflow_metadata_only",
+                 "project_id": self.policy_value["project_id"], "job_id": self.policy_value["job_id"],
+                 "agent_id": self.agent, "event_id": str(uuid.uuid4()),
+                 "configuration_id": str(uuid.uuid4()), "model_id": str(uuid.uuid4()),
+                 "sequence": "1", "round": "", "event_type": "configuration_approved",
+                 "framework": "generic", "framework_version": "1.0",
+                 "artifact_sha256": "", "artifact_size": ""}
+        probe.write_text(json.dumps(event))
+        pin = self.command("sign", "--event", probe, "--key-file", legacy, "--agent-id", self.agent,
+                           "--out", self.root / "probe-receipt.json")["producer_pin"]
+        self.policy_value["producers"].append({"agent_id": self.agent, "key_id": pin, "event_types": _EVENTS})
+        self.write_policy()
+        classic = self.recorder(key_file=legacy).record("configuration_approved")
+        self.assertEqual(classic.status, "ready", classic.error)
+        self.assertEqual(json.loads(classic.receipt_path.read_bytes())["bundle"]["protocol"], _CORE_01)
+        modern = self.recorder().record("work_completed", round=1)
+        self.assertEqual(modern.status, "ready", modern.error)
+        mixed = self.command("verify-set", "--directory", self.kwargs["archive_directory"],
+                             "--policy", self.policy)
+        self.assertEqual(mixed["core_protocols"], [_CORE_01, _CORE_03])
+        self.command("verify-set", "--directory", self.kwargs["archive_directory"],
+                     "--policy", self.policy, "--require-post-quantum", valid=False)
+        self.command("verify", "--receipt", classic.receipt_path, "--policy", self.policy,
+                     "--require-post-quantum", valid=False)
+        with self.assertRaisesRegex(ValueError, "^archive_invalid$"):
+            self.recorder(require_post_quantum=True)
+        strict_classic = self.recorder(key_file=legacy, archive_directory=self.root / "strict",
+                                       require_post_quantum=True)
+        outcome = strict_classic.record("configuration_approved")
+        self.assertEqual((outcome.status, outcome.error), ("failed", "receipt_invalid"))
 
     def test_empty_archive_rejects_wrong_policy_project_or_job(self):
         for field in ("project_id", "job_id"):

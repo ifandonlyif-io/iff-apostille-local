@@ -11,7 +11,7 @@ deliberately prevent accidental startup.
 One Linux host, one selected GPU, one active model. The Go gateway serves TLS on
 8443 and calls an unexposed vLLM runtime on an internal Docker network. Each
 project has its own API key hash and model allowlist. The runtime never sees the
-TLS private key or Apostille signing seed. The administrator CLI runs on the
+TLS private key or Apostille signing key. The administrator CLI runs on the
 host; the gateway has no Docker socket, privileged mode, management route or
 download operation. Models are selected from the configured catalog; installing
 a model and activating it are separate administrator operations.
@@ -159,11 +159,20 @@ Empty `tool_call_parser` and `runtime_profile` strings are equivalent to omitted
 fields, matching the Go manifest encoder. No other field is normalized or
 ignored; nonempty options must match the pinned manifest exactly.
 
-Optional evidence uses `directory: /evidence`, `key_file: /signing/seed.bin`, and
-an Apostille Core UUID `agent_id`. The seed must be a locally generated raw
-32-byte Ed25519 seed, owner-only, never an API key or a hosted service key. For
-example, `openssl rand -out seed.bin 32` writes directly to a file; establish
-`umask 077` first. Keep evidence disabled by leaving its fields empty until the
+Optional evidence uses `directory: /evidence`, `key_file: /signing/signing-key.json`, and
+an Apostille Core UUID `agent_id`. The key must be a locally generated ML-DSA-65
+Apostille JSON key file (Core 0.3, post-quantum), owner-only, never an API key or
+a hosted service key. Generate it with `umask 077` set first, using either
+`apostille keygen --out signing-key.json --role gateway` (the Apostille CLI,
+`go install github.com/ifandonlyif-io/iff-apostille/cmd/apostille@v0.4.0-alpha.1`;
+its default algorithm is ML-DSA-65) or `bin/apostille-workflow keygen --out-key
+signing-key.json --agent-id <uuid>`. Both write the same file format and refuse
+to overwrite. An existing Ed25519 key keeps working and signs Core 0.1, which is
+classical, not post-quantum: either an Apostille JSON key file or the legacy raw
+32-byte seed (accepted for compatibility only; do not create new ones). Any other
+file content is rejected. Set `"require_post_quantum": true` in the `evidence`
+object to make the gateway refuse to start with a key that does not sign Core 0.3.
+Keep evidence disabled by leaving its fields empty until the
 key and receiver pin have been provisioned. Evidence is producer metadata only:
 it does not prove output integrity, actual model execution, truth, or isolation.
 
@@ -174,7 +183,7 @@ Provision the following permissions for the template's UID/GID `10001:10001`:
 | Config directory / config file | root:10001, 0750 / 0640 | Admin writes, containers read |
 | Imported model directories / files | root:10001, 0550 / 0440 | Runtime reads; admin owns lifecycle |
 | TLS directory / certificate and key | 10001:10001, 0700 / 0600 | Gateway can read private key |
-| Signing directory / raw seed | 10001:10001, 0700 / 0600 | Required owner-only seed |
+| Signing directory / key file | 10001:10001, 0700 / 0600 | Required owner-only key file |
 | Evidence directory | 10001:10001, 0700 | Gateway writes bounded metadata |
 | Administrator state directory | root:root, 0700 | Never mounted into a container |
 

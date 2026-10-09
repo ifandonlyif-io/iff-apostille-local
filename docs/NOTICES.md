@@ -10,11 +10,12 @@ of all required license texts**.
 
 | Component | Selected version | License / upstream license |
 | --- | --- | --- |
-| Apostille Core | `v0.1.0-alpha.1` | [MIT](https://github.com/ifandonlyif-io/iff-apostille/blob/v0.1.0-alpha.1/LICENSE), copyright 2024 IfAndOnlyIf.io |
+| Apostille Core | `v0.4.0-alpha.1` | [MIT](https://github.com/ifandonlyif-io/iff-apostille/blob/v0.4.0-alpha.1/LICENSE), copyright 2024 IfAndOnlyIf.io |
 | santhosh-tekuri/jsonschema | `v6.0.2` | [Apache-2.0](https://github.com/santhosh-tekuri/jsonschema/blob/v6.0.2/LICENSE) |
 | cyberphone/json-canonicalization | `19d51d7fe467` (2024-12-13 pseudo-version) | [Apache-2.0](https://github.com/cyberphone/json-canonicalization/blob/19d51d7fe467/LICENSE), copyright 2018 Anders Rundgren |
+| filippo.io/edwards25519 | `v1.2.0` | [BSD-3-Clause](https://github.com/FiloSottile/edwards25519/blob/v1.2.0/LICENSE), copyright 2009 The Go Authors |
 | golang.org/x/text | `v0.41.0` | [BSD-3-Clause](https://cs.opensource.google/go/x/text/+/refs/tags/v0.41.0:LICENSE), copyright The Go Authors |
-| Go standard library / selected toolchain | `go1.26.9` | [Go license](https://go.dev/LICENSE), BSD-3-Clause; included vendored components may have additional notices |
+| Go standard library / selected toolchain | `go1.27.2` | [Go license](https://go.dev/LICENSE), BSD-3-Clause; included vendored components may have additional notices |
 
 `go.mod` and `go.sum` are authoritative for the actual dependency versions and
 module checksums. The license inventory must be refreshed when they change.

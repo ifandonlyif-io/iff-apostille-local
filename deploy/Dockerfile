@@ -1,4 +1,4 @@
-# Supply a preloaded, independently verified golang:1.26.9+ image digest.
+# Supply a preloaded, independently verified golang:1.27.2+ image digest.
 # The build uses a locally prepared vendor/ tree and --network=none.
 ARG GO_BUILD_IMAGE
 FROM ${GO_BUILD_IMAGE} AS build

@@ -58,15 +58,15 @@ class PreviewTests(unittest.TestCase):
         if args == ["go", "env", "GOROOT"]:
             return str(self.go_root)
         if args == ["go", "env", "GOVERSION"]:
-            return "go1.26.0"
+            return "go1.27.2"
         if args == ["go", "version"]:
-            return "go version go1.26.0 linux/amd64"
+            return "go version go1.27.2 linux/amd64"
         self.fail("unexpected external command")
 
     def finalize(self):
         modules = [
             {"Module": {"Path": "github.com/ifandonlyif-io/iff-apostille-local", "Main": True}},
-            {"Module": {"Path": "github.com/ifandonlyif-io/iff-apostille", "Version": "v0.1.0-alpha.1"}},
+            {"Module": {"Path": "github.com/ifandonlyif-io/iff-apostille", "Version": "v0.4.0-alpha.1"}},
         ]
         with patch.object(preview.subprocess, "run",
                           return_value=SimpleNamespace(stdout="\n".join(map(json.dumps, modules)))), \
@@ -77,7 +77,7 @@ class PreviewTests(unittest.TestCase):
     def test_current_gateway_sdk_api_and_make_versions_are_coherent(self):
         self.assertEqual(preview.versions(), ("0.1.0-alpha.2", "0.1.0a2"))
         go_mod = (preview.ROOT / "go.mod").read_text()
-        self.assertIn("github.com/ifandonlyif-io/iff-apostille v0.1.0-alpha.1", go_mod)
+        self.assertIn("github.com/ifandonlyif-io/iff-apostille v0.4.0-alpha.1", go_mod)
 
     def test_each_mismatched_source_rejects_before_output_creation(self):
         for name in ("internal/gateway/gateway.go", "api/openapi.yaml", "Makefile"):
@@ -135,7 +135,7 @@ class PreviewTests(unittest.TestCase):
         packages = {item["name"]: item["versionInfo"] for item in
                     json.loads((self.out / "software.spdx.json").read_text())["packages"]}
         self.assertEqual(packages["github.com/ifandonlyif-io/iff-apostille-local"], self.version)
-        self.assertEqual(packages["github.com/ifandonlyif-io/iff-apostille"], "v0.1.0-alpha.1")
+        self.assertEqual(packages["github.com/ifandonlyif-io/iff-apostille"], "v0.4.0-alpha.1")
         self.assertEqual(packages["apostille-local"], self.sdk_version)
         checksums = (self.out / "SHA256SUMS").read_text()
         self.assertNotIn(".preview-", checksums)

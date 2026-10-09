@@ -368,7 +368,7 @@ class EndToEndTests(unittest.TestCase):
             event = json.loads(next(archive.glob("*.json")).read_text())["event"]
             recorder = WorkflowRecorder(
                 executable=self.executable, archive_directory=archive,
-                key_file=output / "site-1" / "synthetic-key.seed",
+                key_file=output / "site-1" / "synthetic-key.json",
                 policy_path=output / "receiver-policy.json",
                 **{field: event[field] for field in ("agent_id", "project_id", "job_id",
                     "configuration_id", "model_id", "framework", "framework_version")})
@@ -395,7 +395,7 @@ class EndToEndTests(unittest.TestCase):
                 with self.subTest(role=role):
                     archive = output / role / "receipts"
                     event = json.loads(next(archive.glob("*.json")).read_text())["event"]
-                    key = output / role / "synthetic-key.seed"
+                    key = output / role / "synthetic-key.json"
                     arguments = dict(executable=self.executable, archive_directory=archive,
                         key_file=key, policy_path=output / "receiver-policy.json",
                         **{field: event[field] for field in ("agent_id", "project_id", "job_id",

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,10 +16,15 @@ import (
 
 func exportedRecord(t *testing.T) (string, string, string) {
 	t.Helper()
+	return exportedRecordWithKey(t, bytes.Repeat([]byte{55}, 32))
+}
+
+// exportedRecordWithKey signs one record with the given key file contents.
+func exportedRecordWithKey(t *testing.T, keyContents []byte) (string, string, string) {
+	t.Helper()
 	dir := t.TempDir()
-	seed := bytes.Repeat([]byte{55}, 32)
 	key := filepath.Join(dir, "key")
-	if err := os.WriteFile(key, seed, 0600); err != nil {
+	if err := os.WriteFile(key, keyContents, 0600); err != nil {
 		t.Fatal(err)
 	}
 	s, err := evidence.New(filepath.Join(dir, "records"), key, "11111111-1111-4111-8111-111111111111")
@@ -55,11 +59,7 @@ func exportedRecord(t *testing.T) (string, string, string) {
 	if err = os.WriteFile(bundlePath, bundle, 0600); err != nil {
 		t.Fatal(err)
 	}
-	signer, err := core.NewSigner(base64.RawURLEncoding.EncodeToString(seed))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return artifactPath, bundlePath, signer.KeyID()
+	return artifactPath, bundlePath, r.Bundle.Statement.Signature.KeyID
 }
 
 func TestOfflineVerifyAuthenticatesProducerSeparately(t *testing.T) {
@@ -119,5 +119,41 @@ func TestVerifierRejectsSymlinksAndOversizedFiles(t *testing.T) {
 	}
 	if _, err := readFile(large, evidence.MaxRecordBytes); err == nil {
 		t.Fatal("oversized input accepted")
+	}
+}
+
+func TestRequirePostQuantumFlag(t *testing.T) {
+	keyFile, err := core.GenerateMLDSAKeyFile("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyJSON, _ := json.Marshal(keyFile)
+	pqArtifact, pqBundle, pqPin := exportedRecordWithKey(t, keyJSON)
+	var out bytes.Buffer
+	if err = run([]string{"--artifact", pqArtifact, "--bundle", pqBundle, "--producer-pin", pqPin, "--require-post-quantum"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Valid        bool   `json:"valid"`
+		CoreProtocol string `json:"core_protocol"`
+	}
+	if json.Unmarshal(out.Bytes(), &result) != nil || !result.Valid || result.CoreProtocol != core.Protocol03 {
+		t.Fatalf("unexpected output %s", out.String())
+	}
+	// Core 0.1 verifies by default and is rejected under the flag.
+	artifact, bundle, pin := exportedRecord(t)
+	out.Reset()
+	if err = run([]string{"--artifact", artifact, "--bundle", bundle, "--producer-pin", pin}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal(out.Bytes(), &result) != nil || result.CoreProtocol != core.Protocol {
+		t.Fatalf("unexpected output %s", out.String())
+	}
+	out.Reset()
+	if err = run([]string{"--artifact", artifact, "--bundle", bundle, "--producer-pin", pin, "--require-post-quantum"}, &out); err == nil {
+		t.Fatal("Core 0.1 record accepted under --require-post-quantum")
+	}
+	if strings.Contains(out.String(), `"valid":true`) {
+		t.Fatalf("unexpected success output %s", out.String())
 	}
 }

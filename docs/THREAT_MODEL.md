@@ -54,7 +54,8 @@ A success receipt is signed only after the gateway wrote and flushed the final
 output, which does not prove the client read it. The signed `completed_at` is
 the time the gateway finished validating that output, before sending it.
 
-The Core 0.1 producer signature proves that the holder of an embedded key signed
+The Core producer signature (Core 0.3 ML-DSA-65 for new keys, Core 0.1 Ed25519 for
+existing ones) proves that the holder of an embedded key signed
 a metadata assertion. It does not prove exact output content, execution of a
 particular model, physical GPU identity, non-exfiltration, factual correctness,
 or clinical/pharmaceutical suitability. Model identifiers, revisions and digests
@@ -70,7 +71,9 @@ It does not establish tool execution, tool authorization or completion of an
 agent workflow. Function names, arguments and results are not included in the
 metadata receipt. Use a verifier from the same reviewed release/source revision
 as the gateway; older preview verifiers that accept only `stop` and `length`
-reject these new metadata records. Apostille Core 0.1 signatures are unchanged.
+reject these new metadata records. Apostille Core 0.1 signatures are unchanged. Only Core 0.3 signatures are
+post-quantum; Core 0.1 signatures, including those from a legacy raw seed, are
+classical and are not protected against a future quantum adversary.
 
 ## Abuse cases to exercise before a customer pilot
 

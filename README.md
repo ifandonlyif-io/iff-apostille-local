@@ -6,7 +6,16 @@ model catalog, an optional signed metadata receipt, and a Python SDK.
 
 This repository is a separate product prototype. It does not change IFF's hosted
 x402 monitor, publish inference activity to a public transparency log, or modify
-Apostille Core 0.1. It is not a validated pharmaceutical system.
+Apostille Core. It is not a validated pharmaceutical system.
+
+**Signatures.** New signing keys are ML-DSA-65 JSON key files and sign Apostille
+Core 0.3, the post-quantum signature version. Existing Ed25519 keys (an Apostille
+JSON key file, or the legacy raw 32-byte seed) keep signing Core 0.1, which is
+classical, not post-quantum. Each record is signed in its key's version.
+Verifiers accept Core 0.1 and Core 0.3 by default; `--require-post-quantum`
+accepts only Core 0.3. Producer-only signatures prove a signed metadata
+assertion, not output integrity, actual model execution, truth or
+non-exfiltration.
 
 ## What is available
 
@@ -47,7 +56,7 @@ receivers need independently supplied exact key pins for trust.
    [Flower CPU example](integrations/flower/README.md). These use a separate
    event profile and archive; the gateway does not become a training service.
 
-The repository requires Go 1.26.9+ (minimum patched toolchain in `go.mod`). For SDK work:
+The repository requires Go 1.27.2+ (minimum patched toolchain in `go.mod`). For SDK work:
 
 ```sh
 python3 -m venv .venv

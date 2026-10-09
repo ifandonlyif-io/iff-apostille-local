@@ -1,16 +1,16 @@
 package workflowevidence
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/ifandonlyif-io/iff-apostille-local/internal/signingkey"
 	core "github.com/ifandonlyif-io/iff-apostille/apostille"
 )
 
@@ -54,18 +54,21 @@ func readBounded(f *os.File, limit int64) ([]byte, error) {
 	return raw, nil
 }
 
+// ReadSigner reads a private key file: an Apostille JSON key file (Ed25519 or
+// ML-DSA-65) or the legacy classical raw 32-byte Ed25519 seed. Any other
+// content is ErrInvalid, and errors never carry file bytes.
 func ReadSigner(path string) (*core.Signer, error) {
 	f, err := openRegular(path, true)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	seed, err := readBounded(f, 32)
-	defer clear(seed)
-	if err != nil || len(seed) != 32 {
+	raw, err := readBounded(f, signingkey.MaxBytes)
+	defer clear(raw)
+	if err != nil {
 		return nil, ErrInvalid
 	}
-	signer, err := core.NewSigner(base64.RawURLEncoding.EncodeToString(seed))
+	signer, err := signingkey.Parse(raw)
 	if err != nil {
 		return nil, ErrInvalid
 	}
@@ -90,20 +93,23 @@ func WriteExclusive(path string, data []byte) error {
 	return nil
 }
 
+// GenerateKey writes a new ML-DSA-65 (Core 0.3) JSON key file exclusively with
+// mode 0600 and returns its key ID.
 func GenerateKey(path string) (string, error) {
-	seed := make([]byte, 32)
-	defer clear(seed)
-	if _, err := rand.Read(seed); err != nil {
+	file, err := core.GenerateMLDSAKeyFile("")
+	if err != nil {
 		return "", ErrIO
 	}
-	signer, err := core.NewSigner(base64.RawURLEncoding.EncodeToString(seed))
+	raw, err := json.Marshal(file)
+	defer clear(raw)
 	if err != nil {
 		return "", ErrInvalid
 	}
-	if err = WriteExclusive(path, seed); err != nil {
+	raw = append(raw, '\n')
+	if err = WriteExclusive(path, raw); err != nil {
 		return "", err
 	}
-	return signer.KeyID(), nil
+	return file.KeyID, nil
 }
 
 func HashFile(path string) (string, string, error) {
@@ -152,6 +158,11 @@ func MatchArtifact(v Verification, path string) (Verification, error) {
 }
 
 func VerifyDirectory(path string, policy Policy) (SetVerification, error) {
+	return VerifyDirectoryWith(path, policy, VerifyOptions{})
+}
+
+// VerifyDirectoryWith is VerifyDirectory with explicit options.
+func VerifyDirectoryWith(path string, policy Policy, opts VerifyOptions) (SetVerification, error) {
 	var out SetVerification
 	if policy.Validate() != nil {
 		return out, ErrInvalid
@@ -205,7 +216,7 @@ func VerifyDirectory(path string, policy Policy) (SetVerification, error) {
 			if err != nil {
 				return out, err
 			}
-			v, err := Verify(raw, policy)
+			v, err := VerifyWith(raw, policy, opts)
 			if err != nil {
 				return out, err
 			}
