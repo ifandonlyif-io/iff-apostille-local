@@ -433,6 +433,16 @@ class _SSE:
             yield result
 
 
+# After [DONE] the stream is read to its end. The gateway settles the receipt
+# before it ends the response, so a fully iterated stream never leaves the
+# receipt pending. Only blank lines may follow [DONE].
+def _trailing(block: bytes, seen: int, run_id: str | None) -> int:
+    seen += len(block)
+    if block.strip(b"\r\n") or seen > _MAX_EVENT:
+        raise APIError("invalid_stream", run_id=run_id)
+    return seen
+
+
 class Stream:
     """Use only inside Client.chat.stream's context manager."""
 
@@ -443,10 +453,16 @@ class Stream:
     def __iter__(self) -> Iterator[Response]:
         parser = _SSE(self.run_id)
         try:
-            for block in self._response.iter_bytes():
+            blocks = self._response.iter_bytes()
+            for block in blocks:
                 yield from parser.feed(block)
                 if parser.done:
-                    return
+                    break
+            if parser.done:
+                trailing = 0
+                for block in blocks:
+                    trailing = _trailing(block, trailing, self.run_id)
+                return
         except httpx.TimeoutException:
             raise APIError("timeout", run_id=self.run_id) from None
         except httpx.HTTPError:
@@ -465,11 +481,17 @@ class AsyncStream:
     async def __aiter__(self) -> AsyncIterator[Response]:
         parser = _SSE(self.run_id)
         try:
-            async for block in self._response.aiter_bytes():
+            blocks = self._response.aiter_bytes()
+            async for block in blocks:
                 for result in parser.feed(block):
                     yield result
                 if parser.done:
-                    return
+                    break
+            if parser.done:
+                trailing = 0
+                async for block in blocks:
+                    trailing = _trailing(block, trailing, self.run_id)
+                return
         except httpx.TimeoutException:
             raise APIError("timeout", run_id=self.run_id) from None
         except httpx.HTTPError:

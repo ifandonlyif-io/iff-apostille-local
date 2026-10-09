@@ -8,12 +8,37 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	schema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
+// sseWriter sends SSE frames. A send succeeds only when both the write and the
+// flush succeed. That proves the bytes left the gateway, not that a client read them.
+type sseWriter struct {
+	w  io.Writer
+	rc *http.ResponseController
+}
+
+func newSSEWriter(w http.ResponseWriter) sseWriter {
+	return sseWriter{w: w, rc: http.NewResponseController(w)}
+}
+
+// send writes frames in one call and flushes once; an empty send only flushes,
+// which also proves the writer can stream at all.
+func (s sseWriter) send(frames string) bool {
+	if frames != "" {
+		// Write, not io.WriteString: wrappers that override Write must see every byte.
+		if _, err := s.w.Write([]byte(frames)); err != nil {
+			return false
+		}
+	}
+	return s.rc.Flush() == nil
+}
+
 // streamSink receives only events that already passed runtime validation. The
-// loop below owns every check; sinks only encode the public protocol.
+// loop below owns every check; sinks only encode the public protocol. start
+// must flush so that a writer that cannot stream fails before any output.
 type streamSink interface {
 	start() bool
 	chunk(data, text string) bool
@@ -23,11 +48,11 @@ type streamSink interface {
 	fail()
 }
 
-func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader, request Request, s *schema.Schema, finish func(string), runtimeProfile string, sink streamSink) {
+func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader, request Request, s *schema.Schema, finish func(string, time.Time), runtimeProfile string, sink streamSink) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
-	if _, ok := w.(http.Flusher); !ok || !sink.start() {
+	if !sink.start() {
 		return
 	}
 	streamError := sink.fail
@@ -41,7 +66,6 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 	reason := ""
 	var usage json.RawMessage
 	total := 0
-	done := false
 	consume := func() bool {
 		if len(event) == 0 {
 			return true
@@ -54,14 +78,15 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 				streamError()
 				return false
 			}
-			// Buffered content and terminal events must be written successfully
+			// Record completion before writing: the signed time describes the
+			// validated generation, not how long the client took to read it.
+			completed := time.Now().UTC()
+			// Buffered content and terminal events must be written and flushed
 			// before a success receipt can be created. A write/flush failure leaves
 			// the request incomplete so infer's deferred cleanup fails the receipt.
-			if !sink.commit(reason, calls, usage) {
-				return false
+			if sink.commit(reason, calls, usage) {
+				finish(reason, completed)
 			}
-			finish(reason)
-			done = true
 			return false
 		}
 		var chunk struct {
@@ -144,9 +169,8 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 			return
 		}
 	}
-	if !done {
-		streamError()
-	}
+	// Every successful path returns from inside the loop at [DONE].
+	streamError()
 }
 
 type toolDelta struct {

@@ -58,7 +58,8 @@ with Client(base_url="https://gateway.example.internal:8443",
     run_id = result.run_id
     if run_id:
         evidence = client.evidence.get(run_id)
-        # pending, ready, or failed; no automatic polling or retry.
+        # ready or failed once the response was read; pending only while a run
+        # is still in progress. No automatic polling or retry.
         status = evidence["receipt_status"]
 ```
 
@@ -135,7 +136,11 @@ with Client(base_url="https://gateway.example.internal:8443",
 The stream must remain inside its context manager. Leaving the context closes the
 HTTP response, including on early break or error. The gateway can observe that
 disconnect and cancel backend work. A `[DONE]` terminator is required for complete
-streams; silent EOF is an `incomplete_stream` error. Each SSE event is capped at
+streams; silent EOF is an `incomplete_stream` error. After `[DONE]` the iterator
+reads the response to its end, where only blank lines may follow (anything else
+raises `invalid_stream`). The gateway ends a recorded response only after its
+receipt is settled, so after a fully iterated stream `evidence.get(stream.run_id)`
+returns `ready` or `failed`, not `pending`. Breaking out early skips this. Each SSE event is capped at
 1 MiB; ordinary JSON responses are capped at 4 MiB. These SDK limits can be stricter
 than a future server; this version intentionally fails closed.
 

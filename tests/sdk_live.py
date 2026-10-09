@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 
 from apostille_local import APIError, AsyncClient, Client
 
@@ -79,23 +78,10 @@ def verify_download(files, run_id, *, negative_checks=False):
         assert rejected.returncode != 0 and json.loads(rejected.stdout)["valid"] is False
 
 
-# Stream receipts are signed only after the final frame is written and flushed,
-# so a query right after the stream can still see pending. Wait it out briefly.
-def settled(client, run_id):
-    for _ in range(250):
-        evidence = client.evidence.get(run_id)
-        if evidence["receipt_status"] != "pending":
-            return evidence
-        time.sleep(.02)
-    return evidence
-
-
-async def asettled(client, run_id):
-    for _ in range(250):
-        evidence = await client.evidence.get(run_id)
-        if evidence["receipt_status"] != "pending":
-            return evidence
-        await asyncio.sleep(.02)
+# A fully read stream ends only after the gateway settled its receipt, so no
+# polling is needed; report the status itself rather than a missing manifest.
+def ready_receipt(evidence):
+    assert evidence["receipt_status"] == "ready", evidence["receipt_status"]
     return evidence
 
 
@@ -133,7 +119,7 @@ with Client(**options) as client:
     with client.chat.stream(model="qwen3-4b", messages=messages, record=True) as stream:
         chunks = list(stream)
         assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
-        assert settled(client, stream.run_id)["receipt_status"] == "ready"
+        assert ready_receipt(client.evidence.get(stream.run_id))
     response = client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
                                   tool_choice="required", parallel_tool_calls=False,
                                   max_completion_tokens=32, stop="END", n=1, record=True)
@@ -146,7 +132,7 @@ with Client(**options) as client:
                             tool_choice="auto", parallel_tool_calls=False,
                             stream_options={"include_usage": True}, record=True) as stream:
         check_tool_stream(list(stream))
-        assert settled(client, stream.run_id)["manifest"]["finish_reason"] == "tool_calls"
+        assert ready_receipt(client.evidence.get(stream.run_id))["manifest"]["finish_reason"] == "tool_calls"
     # The synthetic vLLM backend emits stop for named function calling. Both
     # native client paths see the normalized public reason and signed metadata.
     named = client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
@@ -157,7 +143,7 @@ with Client(**options) as client:
                             tool_choice=named_choice, stream_options={"include_usage": True},
                             record=True) as stream:
         check_tool_stream(list(stream))
-        assert settled(client, stream.run_id)["manifest"]["finish_reason"] == "tool_calls"
+        assert ready_receipt(client.evidence.get(stream.run_id))["manifest"]["finish_reason"] == "tool_calls"
 
 
 async def main():
@@ -170,7 +156,7 @@ async def main():
         verify_download(files, response.run_id)
         async with client.chat.stream(model="qwen3-4b", messages=messages, record=True) as stream:
             assert len([chunk async for chunk in stream]) == 2
-            assert (await asettled(client, stream.run_id))["receipt_status"] == "ready"
+            assert ready_receipt(await client.evidence.get(stream.run_id))
         response = await client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
                                            tool_choice="required", parallel_tool_calls=False,
                                            max_completion_tokens=32, n=1, record=True)
@@ -183,7 +169,7 @@ async def main():
                                       tool_choice=named_choice,
                                       stream_options={"include_usage": True}, record=True) as stream:
             check_tool_stream([chunk async for chunk in stream])
-            assert (await asettled(client, stream.run_id))["manifest"]["finish_reason"] == "tool_calls"
+            assert ready_receipt(await client.evidence.get(stream.run_id))["manifest"]["finish_reason"] == "tool_calls"
         named = await client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
                                          tool_choice=named_choice, record=True)
         reply_history(named)

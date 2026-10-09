@@ -50,6 +50,9 @@ An evidence response can be `pending`, `ready` or `failed`. `ready` means a
 metadata receipt is available; it is separate from the inference outcome. A
 cancelled or failed inference must never be relabeled successful simply because
 its receipt was signed. Receipt failure does not justify retrying inference.
+A success receipt is signed only after the gateway wrote and flushed the final
+output, which does not prove the client read it. The signed `completed_at` is
+the time the gateway finished validating that output, before sending it.
 
 The Core 0.1 producer signature proves that the holder of an embedded key signed
 a metadata assertion. It does not prove exact output content, execution of a

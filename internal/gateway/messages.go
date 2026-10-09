@@ -22,7 +22,7 @@ var messagesDialect = dialect{
 	fail:   messagesFail,
 	render: renderMessage,
 	sink: func(w http.ResponseWriter, id string, request Request) streamSink {
-		return &messagesSink{w: w, id: id, model: request.Model}
+		return &messagesSink{out: newSSEWriter(w), id: id, model: request.Model}
 	},
 }
 

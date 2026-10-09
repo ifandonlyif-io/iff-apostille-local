@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -22,19 +21,15 @@ var chatDialect = dialect{
 	parse:  parseRequest,
 	fail:   fail,
 	render: func(_ string, _ Request, res completionResult) ([]byte, bool) { return res.data, true },
-	sink:   func(w http.ResponseWriter, _ string, _ Request) streamSink { return &chatSink{w: w} },
+	sink:   func(w http.ResponseWriter, _ string, _ Request) streamSink { return &chatSink{out: newSSEWriter(w)} },
 }
 
-type chatSink struct{ w http.ResponseWriter }
+type chatSink struct{ out sseWriter }
 
 func (s *chatSink) emit(data string) bool {
-	_, e := fmt.Fprintf(s.w, "data: %s\n\n", strings.ReplaceAll(data, "\n", "\ndata: "))
-	if e != nil {
-		return false
-	}
-	return http.NewResponseController(s.w).Flush() == nil
+	return s.out.send("data: " + strings.ReplaceAll(data, "\n", "\ndata: ") + "\n\n")
 }
-func (s *chatSink) start() bool                               { return true }
+func (s *chatSink) start() bool                               { return s.out.send("") }
 func (s *chatSink) chunk(data, _ string) bool                 { return s.emit(data) }
 func (s *chatSink) usage(data string, _ json.RawMessage) bool { return s.emit(data) }
 func (s *chatSink) ready(string, json.RawMessage) bool        { return true }

@@ -203,6 +203,22 @@ class SyncTests(Fixture, unittest.TestCase):
         with patch("apostille_local.client._MAX_EVENT", 32), self.assertRaisesRegex(APIError, "stream_event_too_large"):
             list(parser.feed(b"data: " + b"a" * 33))
 
+    def test_stream_reads_to_end_after_done(self):
+        # The response ends only after the gateway settles the receipt.
+        body = SyncBody([CHUNK, DONE, b"\r\n", b"\n"])
+        with self.client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+            with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                self.assertEqual(len(list(stream)), 1)
+                self.assertEqual(body.reads, 4)
+        # Data after [DONE], or more blank bytes than one event may hold, is rejected.
+        for blocks, limit in [([CHUNK, DONE, CHUNK], 1024), ([DONE, b"\n" * 33], 32)]:
+            body = SyncBody(blocks)
+            with self.subTest(limit=limit), patch("apostille_local.client._MAX_EVENT", limit), \
+                    self.client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+                with self.assertRaisesRegex(APIError, "^invalid_stream$"):
+                    with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                        list(stream)
+
     def test_stream_incomplete_invalid_and_error(self):
         for raw, code in [(CHUNK, "incomplete_stream"), (b"data: bad\n\n", "invalid_response"), (b'data: {"error":{"message":"backend-secret"}}\n\n', "stream_error")]:
             body = SyncBody([raw])
@@ -318,6 +334,17 @@ class AsyncTests(Fixture, unittest.IsolatedAsyncioTestCase):
             async with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
                 self.assertEqual(stream.run_id, "run-1")
                 self.assertEqual(len([chunk async for chunk in stream]), 1)
+
+    async def test_async_stream_reads_to_end_after_done(self):
+        for blocks, error in [([CHUNK, DONE, b"\n"], None), ([CHUNK, DONE, CHUNK], "invalid_stream")]:
+            body = AsyncBody(blocks)
+            async with self.async_client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+                async with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                    if error is None:
+                        self.assertEqual(len([chunk async for chunk in stream]), 1)
+                    else:
+                        with self.assertRaisesRegex(APIError, "^" + error + "$"):
+                            [chunk async for chunk in stream]
 
     async def test_async_cancellation_closes_response(self):
         body = AsyncBody([CHUNK], wait=True)

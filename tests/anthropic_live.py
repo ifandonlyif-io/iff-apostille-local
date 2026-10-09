@@ -83,7 +83,10 @@ with httpx.Client(verify=tls, trust_env=False, follow_redirects=False,
             use = only_tool_use(first)
             with client.messages.stream(model=model, max_tokens=64, messages=messages, tools=tools,
                                         tool_choice=choice) as stream:
+                # Act on tool calls only after an explicit message_stop event.
+                kinds = [event.type for event in stream]
                 streamed = stream.get_final_message()
+            assert kinds[-1] == "message_stop" and "message_delta" in kinds
             assert only_tool_use(streamed).input == {"code": "TEST-001"}
 
         history = messages + [

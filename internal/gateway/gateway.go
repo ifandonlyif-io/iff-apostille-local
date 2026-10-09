@@ -315,7 +315,7 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request, p config.Project
 		d.fail(w, 502, "runtime_rejected")
 		return
 	}
-	finish := func(reason string) {
+	finish := func(reason string, completed time.Time) {
 		if record == "" {
 			complete = true
 			return
@@ -324,7 +324,7 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request, p config.Project
 		m.RunID = id
 		m.GatewayVersion = Version
 		m.StartedAt = start.Format(time.RFC3339Nano)
-		m.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		m.CompletedAt = completed.Format(time.RFC3339Nano)
 		m.FinishReason = reason
 		if g.store.Complete(p.ID, id, m) == nil {
 			complete = true
@@ -353,10 +353,16 @@ func (g *Gateway) infer(w http.ResponseWriter, r *http.Request, p config.Project
 		d.fail(w, 504, "inference_timeout")
 		return
 	}
-	finish(res.reason)
+	completed := time.Now().UTC()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, _ = w.Write(out)
+	// As for streams, a success receipt requires a successful write and flush.
+	// Clients that read the body to its end observe the settled receipt, since
+	// the response ends only after this handler returns.
+	if _, err := w.Write(out); err != nil || http.NewResponseController(w).Flush() != nil {
+		return
+	}
+	finish(res.reason, completed)
 }
 func checkCompletion(data []byte, request Request) (string, string, bool) {
 	_, content, reason, ok := checkCompletionForRuntime(data, request, "")

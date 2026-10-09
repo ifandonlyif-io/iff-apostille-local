@@ -314,10 +314,13 @@ small `dialect` (parse, error shape, render, stream sink). The streaming
 validator is split into the unchanged runtime-SSE loop and a `streamSink`; the
 Messages sink never forwards tool-call fragments and emits `tool_use` blocks,
 `message_delta` and `message_stop` only after full validation, including the
-sink's own final checks (`ready`). For both endpoints, `finish(reason)` runs
-only after the buffered blocks and terminal frame were written and flushed, so
-a failed delivery leaves a failed receipt. A query immediately after the
-stream can therefore still see `pending`; `tests/sdk_live.py` polls for it. Auth accepts the project token from exactly one of
+sink's own final checks (`ready`), in one write and one flush. For both
+endpoints and for non-streaming responses, `finish(reason)` runs only after
+the final output was written and flushed, so a detected write or flush failure
+leaves a failed receipt. The signed `completed_at` is taken before that output
+is written. The native SDK reads each stream to its end after `[DONE]`; since
+the gateway ends the response only after settling the receipt, a fully read
+stream never leaves it `pending`. Auth accepts the project token from exactly one of
 `X-Api-Key` or `Authorization: Bearer` on this endpoint only. Capabilities gain
 an additive `compatible_apis` entry. Scope, mapping and the unsupported list are
 in [integrations](INTEGRATIONS.md).
