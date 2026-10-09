@@ -24,7 +24,8 @@ func (g *Gateway) capabilities(w http.ResponseWriter, r *http.Request, p config.
 	jsonReply(w, 200, map[string]any{
 		"object": "apostille_local.capabilities", "contract_version": "1",
 		"api_family": "chat_completions", "gateway_version": Version, "models": models,
-		"evidence":       map[string]any{"metadata": g.store != nil, "retention_seconds": int(evidence.Retention.Seconds())},
-		"tool_execution": "client", "unsupported": []string{"responses", "embeddings", "multimodal", "server_tool_execution"},
+		"evidence":        map[string]any{"metadata": g.store != nil, "retention_seconds": int(evidence.Retention.Seconds())},
+		"compatible_apis": []any{map[string]string{"family": "anthropic_messages", "path": "/v1/messages", "anthropic_version": anthropicVersion}},
+		"tool_execution":  "client", "unsupported": []string{"responses", "embeddings", "multimodal", "server_tool_execution"},
 	})
 }

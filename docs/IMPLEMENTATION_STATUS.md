@@ -300,3 +300,60 @@ Final validation with Go 1.26.9 passed:
 The corrected local preview destination is `dist/0.1.0-alpha.2/`, with SDK
 `0.1.0a2`; prior alpha.1 destinations must remain intact. These are software
 checks, with no Docker/GPU service or multi-host deployment executed.
+
+## Anthropic Messages API subset — 2026-10-09
+
+`POST /v1/messages` is a translation layer inside the gateway for applications
+that use the official Anthropic SDK. A Messages request is translated into the
+internal Chat Completions `Request` and passes through the same admission,
+`parseRequest`/`prepareTools` validation, model checks, receipts, runtime call
+and response validation; the validated result is translated back. The runtime
+contract is unchanged and nothing contacts Anthropic. `chat()` and the new
+endpoint now share one `infer` pipeline; the endpoint-specific parts are a
+small `dialect` (parse, error shape, render, stream sink). The streaming
+validator is split into the unchanged runtime-SSE loop and a `streamSink`; the
+Messages sink never forwards tool-call fragments and emits `tool_use` blocks,
+`message_delta` and `message_stop` only after full validation, including the
+sink's own final checks (`ready`), in one write and one flush. For both
+endpoints and for non-streaming responses, `finish(reason)` runs only after
+the final output was written and flushed, so a detected write or flush failure
+leaves a failed receipt. The signed `completed_at` is taken before that output
+is written. The native SDK reads each stream to its end after `[DONE]`; since
+the gateway ends the response only after settling the receipt, a fully read
+stream never leaves it `pending`. Auth accepts the project token from exactly one of
+`X-Api-Key` or `Authorization: Bearer` on this endpoint only. Capabilities gain
+an additive `compatible_apis` entry. Scope, mapping and the unsupported list are
+in [integrations](INTEGRATIONS.md).
+
+The native SDK uses one SSE parsing loop and reuses its event-size counter
+for the tail after `[DONE]`. Only CR/LF bytes are allowed until HTTP EOF;
+the tail limit counts raw bytes (CRLF consumes two), excluding an LF that
+completes the terminal event's CR delimiter. Rejected tails clear the parser's
+completion flag. Sync/async tests cover LF, CRLF and standalone CR split across
+transport blocks, a CR delimiter followed by LF, and data/usage events coalesced
+with `[DONE]` and its tail. Stream fixtures are shared with the client tests.
+
+Validation record (Go 1.26.9 toolchain as installed; Python 3.11.9 virtualenv
+outside the repository with `anthropic==1.8.0`, `openai==2.29.0`):
+
+- `gofmt -l .` printed nothing; `go vet ./...`, `go test ./...` and
+  `go test -race ./...` passed with the pre-existing gateway tests unmodified.
+- `go test ./internal/gateway -run='^$' -fuzz=FuzzMessagesRequest -fuzztime=30s`
+  passed (accepted inputs round-trip through `parseRequest`).
+- SDK suite: 73 tests passed, including 464 tail-boundary subcases. The TLS
+  integration suite (native SDK, OpenAI SDK, the new
+  `tests/anthropic_live.py` with the official Anthropic SDK, LangChain, and the
+  acceptance CLI for both vendors) and 23 acceptance-tool tests passed.
+- `make workflow-test deployment-test compose-check build` passed (13 and 15
+  tests), and `make security` (govulncheck v1.1.4) reported no vulnerabilities.
+- After the SSE cleanup, the SDK suite, TLS integration, 13 live workflow
+  tests, Go tests/race/vet and `git diff --check` passed again. `sdk-test` uses
+  a synthetic signer for `tests/test_workflow.py`; it does not require
+  `APOSTILLE_WORKFLOW_BIN`. `workflow-test` builds and sets that variable for
+  the separate `workflow_tests/test_live.py` suite.
+- `examples/anthropic_client.py` imports with only `anthropic==1.8.0` and its
+  dependencies installed (no `httpx`).
+
+No hardware, Docker or real runtime was exercised; the integration runtime is
+synthetic. Anthropic SDK 1.8.0 has no `temperature`/`top_p`/`top_k` arguments,
+so the live test sends them through `extra_body`.

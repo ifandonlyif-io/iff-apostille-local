@@ -2,15 +2,15 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 
 import httpx
 import certifi
 
-from apostille_local import APIError, AsyncClient, Client, ConfigurationError
+from apostille_local import APIError, Client, ConfigurationError
 from apostille_local.client import _SSE
+from client_test_helpers import AsyncBody, Fixture, SyncBody
 
 MESSAGES = [{"role": "user", "content": "synthetic test"}]
 CHUNK = b'data: {"choices":[{"delta":{"content":"synthetic"}}]}\n\n'
@@ -45,55 +45,6 @@ def ready_evidence():
             "bundle": {"synthetic_bundle": "object is not exported"},
             "manifest_base64": base64.b64encode(MANIFEST).decode(),
             "bundle_base64": base64.b64encode(BUNDLE).decode()}
-
-
-class SyncBody(httpx.SyncByteStream):
-    def __init__(self, blocks):
-        self.blocks = blocks
-        self.closed = False
-        self.reads = 0
-
-    def __iter__(self):
-        for block in self.blocks:
-            self.reads += 1
-            yield block
-
-    def close(self):
-        self.closed = True
-
-
-class AsyncBody(httpx.AsyncByteStream):
-    def __init__(self, blocks, wait=False):
-        self.blocks = blocks
-        self.wait = wait
-        self.waiting = asyncio.Event()
-        self.closed = False
-
-    async def __aiter__(self):
-        for block in self.blocks:
-            yield block
-        if self.wait:
-            self.waiting.set()
-            await asyncio.Event().wait()
-
-    async def aclose(self):
-        self.closed = True
-
-
-class Fixture:
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.token = Path(self.directory.name) / "token"
-        self.token.write_text("synthetic-secret\n")
-
-    def client(self, handler, **kwargs):
-        return Client(base_url="https://gateway.test", token_file=self.token,
-                      transport=httpx.MockTransport(handler), **kwargs)
-
-    def async_client(self, handler):
-        return AsyncClient(base_url="https://gateway.test", token_file=self.token,
-                           transport=httpx.MockTransport(handler))
 
 
 class SyncTests(Fixture, unittest.TestCase):
@@ -202,6 +153,22 @@ class SyncTests(Fixture, unittest.TestCase):
         parser = _SSE(None)
         with patch("apostille_local.client._MAX_EVENT", 32), self.assertRaisesRegex(APIError, "stream_event_too_large"):
             list(parser.feed(b"data: " + b"a" * 33))
+
+    def test_stream_reads_to_end_after_done(self):
+        # The response ends only after the gateway settles the receipt.
+        body = SyncBody([CHUNK, DONE, b"\r\n", b"\n"])
+        with self.client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+            with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                self.assertEqual(len(list(stream)), 1)
+                self.assertEqual(body.reads, 4)
+        # Data after [DONE], or more blank bytes than one event may hold, is rejected.
+        for blocks, limit in [([CHUNK, DONE, CHUNK], 1024), ([DONE, b"\n" * 33], 32)]:
+            body = SyncBody(blocks)
+            with self.subTest(limit=limit), patch("apostille_local.client._MAX_EVENT", limit), \
+                    self.client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+                with self.assertRaisesRegex(APIError, "^invalid_stream$"):
+                    with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                        list(stream)
 
     def test_stream_incomplete_invalid_and_error(self):
         for raw, code in [(CHUNK, "incomplete_stream"), (b"data: bad\n\n", "invalid_response"), (b'data: {"error":{"message":"backend-secret"}}\n\n', "stream_error")]:
@@ -318,6 +285,17 @@ class AsyncTests(Fixture, unittest.IsolatedAsyncioTestCase):
             async with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
                 self.assertEqual(stream.run_id, "run-1")
                 self.assertEqual(len([chunk async for chunk in stream]), 1)
+
+    async def test_async_stream_reads_to_end_after_done(self):
+        for blocks, error in [([CHUNK, DONE, b"\n"], None), ([CHUNK, DONE, CHUNK], "invalid_stream")]:
+            body = AsyncBody(blocks)
+            async with self.async_client(lambda r: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)) as client:
+                async with client.chat.stream(model="synthetic", messages=MESSAGES) as stream:
+                    if error is None:
+                        self.assertEqual(len([chunk async for chunk in stream]), 1)
+                    else:
+                        with self.assertRaisesRegex(APIError, "^" + error + "$"):
+                            [chunk async for chunk in stream]
 
     async def test_async_cancellation_closes_response(self):
         body = AsyncBody([CHUNK], wait=True)

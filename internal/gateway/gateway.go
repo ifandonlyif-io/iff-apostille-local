@@ -61,7 +61,33 @@ func (g *Gateway) auth(r *http.Request) (config.Project, bool) {
 	if len(raw) < 39 || len(raw) > 256 || !strings.HasPrefix(raw, "Bearer ") {
 		return config.Project{}, false
 	}
-	h := sha256.Sum256([]byte(strings.TrimPrefix(raw, "Bearer ")))
+	return g.projectByToken(strings.TrimPrefix(raw, "Bearer "))
+}
+
+// authMessages accepts the same project token from exactly one of the headers
+// the Anthropic SDK may send. Presenting both is ambiguous and is rejected.
+func (g *Gateway) authMessages(r *http.Request) (config.Project, bool) {
+	keys, bearer := r.Header.Values("X-Api-Key"), r.Header.Values("Authorization")
+	if len(keys) > 0 && len(bearer) > 0 {
+		return config.Project{}, false
+	}
+	if len(keys) == 0 {
+		return g.auth(r)
+	}
+	key := keys[0]
+	if len(keys) != 1 || len(key) < 32 || len(key) > 249 {
+		return config.Project{}, false
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return config.Project{}, false
+		}
+	}
+	return g.projectByToken(key)
+}
+
+func (g *Gateway) projectByToken(token string) (config.Project, bool) {
+	h := sha256.Sum256([]byte(token))
 	for _, p := range g.c.Projects {
 		want, _ := hex.DecodeString(p.APIKeySHA256)
 		if subtle.ConstantTimeCompare(h[:], want) == 1 {
@@ -131,6 +157,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, 200, map[string]string{"status": "ready"})
 		return
 	}
+	if r.URL.Path == "/v1/messages" {
+		g.messages(w, r)
+		return
+	}
 	p, ok := g.auth(r)
 	if !ok {
 		fail(w, 401, "unauthorized")
@@ -183,14 +213,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project) {
+	g.infer(w, r, p, chatDialect)
+}
+
+// infer is the single inference pipeline shared by every public API family.
+// A dialect only parses its request, shapes errors and renders validated output.
+func (g *Gateway) infer(w http.ResponseWriter, r *http.Request, p config.Project, d dialect) {
 	// Bound writes as well as runtime reads, including clients that stop reading SSE.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(g.c.TimeoutSeconds+2) * time.Second))
 	if g.draining.Load() {
-		fail(w, 503, "draining")
+		d.fail(w, 503, "draining")
 		return
 	}
 	if ct := strings.Split(r.Header.Get("Content-Type"), ";")[0]; ct != "application/json" {
-		fail(w, 415, "json_required")
+		d.fail(w, 415, "json_required")
 		return
 	}
 	// Admission covers body parsing and schema compilation as well as inference.
@@ -199,58 +235,58 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 	case g.slots <- struct{}{}:
 		defer func() { <-g.slots }()
 	default:
-		fail(w, 429, "capacity_exceeded")
+		d.fail(w, 429, "capacity_exceeded")
 		return
 	}
 	select {
 	case g.projects[p.ID] <- struct{}{}:
 		defer func() { <-g.projects[p.ID] }()
 	default:
-		fail(w, 429, "project_capacity_exceeded")
+		d.fail(w, 429, "project_capacity_exceeded")
 		return
 	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
-		fail(w, 413, "request_too_large")
+		d.fail(w, 413, "request_too_large")
 		return
 	}
 	model := g.c.Active()
-	request, compiled, err := parseRequest(raw, model)
+	request, compiled, err := d.parse(raw, model)
 	if err != nil {
-		fail(w, 400, err.Error())
+		d.fail(w, 400, err.Error())
 		return
 	}
 	if !permitted(p, request.Model) {
-		fail(w, 403, "model_forbidden")
+		d.fail(w, 403, "model_forbidden")
 		return
 	}
 	if request.Model != model.ID {
-		fail(w, 409, "model_inactive")
+		d.fail(w, 409, "model_inactive")
 		return
 	}
 	record := r.Header.Get("X-Apostille-Record")
 	if record != "" && record != "metadata" {
-		fail(w, 400, "invalid_record_mode")
+		d.fail(w, 400, "invalid_record_mode")
 		return
 	}
 	if record != "" && g.store == nil {
-		fail(w, 503, "evidence_disabled")
+		d.fail(w, 503, "evidence_disabled")
 		return
 	}
 	if g.draining.Load() {
-		fail(w, 503, "draining")
+		d.fail(w, 503, "draining")
 		return
 	}
 	id, err := core.NewID()
 	if err != nil {
-		fail(w, 503, "id_unavailable")
+		d.fail(w, 503, "id_unavailable")
 		return
 	}
 	w.Header().Set("X-Apostille-Run-ID", id)
 	start := time.Now().UTC()
 	if record != "" {
 		if err = g.store.Begin(p.ID, id); err != nil {
-			fail(w, 503, "evidence_unavailable")
+			d.fail(w, 503, "evidence_unavailable")
 			return
 		}
 	}
@@ -268,18 +304,18 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 	resp, err := g.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			fail(w, 504, "inference_timeout")
+			d.fail(w, 504, "inference_timeout")
 		} else {
-			fail(w, 502, "runtime_unavailable")
+			d.fail(w, 502, "runtime_unavailable")
 		}
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		fail(w, 502, "runtime_rejected")
+		d.fail(w, 502, "runtime_rejected")
 		return
 	}
-	finish := func(reason string) {
+	finish := func(reason string, completed time.Time) {
 		if record == "" {
 			complete = true
 			return
@@ -288,34 +324,45 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request, p config.Project)
 		m.RunID = id
 		m.GatewayVersion = Version
 		m.StartedAt = start.Format(time.RFC3339Nano)
-		m.CompletedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		m.CompletedAt = completed.Format(time.RFC3339Nano)
 		m.FinishReason = reason
 		if g.store.Complete(p.ID, id, m) == nil {
 			complete = true
 		}
 	}
 	if request.Stream {
-		g.stream(w, r.WithContext(ctx), resp.Body, request, compiled, finish, model.RuntimeProfile)
+		g.stream(w, r.WithContext(ctx), resp.Body, request, compiled, finish, model.RuntimeProfile, d.sink(w, id, request))
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil || len(data) > maxResponse {
-		fail(w, 502, "invalid_runtime_response")
+		d.fail(w, 502, "invalid_runtime_response")
 		return
 	}
-	data, content, reason, ok := checkCompletionForRuntime(data, request, model.RuntimeProfile)
-	if !ok || !validateOutput(compiled, content) {
-		fail(w, 502, "invalid_runtime_response")
+	res, ok := validateCompletion(data, request, model.RuntimeProfile)
+	if !ok || !validateOutput(compiled, res.content) {
+		d.fail(w, 502, "invalid_runtime_response")
+		return
+	}
+	out, ok := d.render(id, request, res)
+	if !ok {
+		d.fail(w, 502, "invalid_runtime_response")
 		return
 	}
 	if ctx.Err() != nil {
-		fail(w, 504, "inference_timeout")
+		d.fail(w, 504, "inference_timeout")
 		return
 	}
-	finish(reason)
+	completed := time.Now().UTC()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
-	_, _ = w.Write(data)
+	// As for streams, a success receipt requires a successful write and flush.
+	// Clients that read the body to its end observe the settled receipt, since
+	// the response ends only after this handler returns.
+	if _, err := w.Write(out); err != nil || http.NewResponseController(w).Flush() != nil {
+		return
+	}
+	finish(res.reason, completed)
 }
 func checkCompletion(data []byte, request Request) (string, string, bool) {
 	_, content, reason, ok := checkCompletionForRuntime(data, request, "")
@@ -323,6 +370,20 @@ func checkCompletion(data []byte, request Request) (string, string, bool) {
 }
 
 func checkCompletionForRuntime(data []byte, request Request, profile string) ([]byte, string, string, bool) {
+	res, ok := validateCompletion(data, request, profile)
+	return res.data, res.content, res.reason, ok
+}
+
+// completionResult is the one validated view of a non-streaming runtime reply.
+type completionResult struct {
+	data    []byte
+	content string
+	reason  string
+	calls   []ToolCall
+	usage   json.RawMessage
+}
+
+func validateCompletion(data []byte, request Request, profile string) (completionResult, bool) {
 	var r struct {
 		Model   string `json:"model"`
 		Choices []struct {
@@ -338,7 +399,7 @@ func checkCompletionForRuntime(data []byte, request Request, profile string) ([]
 		Usage json.RawMessage `json:"usage"`
 	}
 	if validJSON(data) != nil || !runtimeShape(data, false) || json.Unmarshal(data, &r) != nil || r.Error != nil || len(r.Choices) != 1 || r.Model != request.Model || !validUsage(r.Usage, false) {
-		return nil, "", "", false
+		return completionResult{}, false
 	}
 	c := r.Choices[0]
 	var calls []ToolCall
@@ -346,23 +407,23 @@ func checkCompletionForRuntime(data []byte, request Request, profile string) ([]
 		// Validate exact keys before decoding: encoding/json is case-insensitive,
 		// while the customer executes the original wire representation.
 		if !callsShape(c.Message.ToolCalls) || json.Unmarshal(c.Message.ToolCalls, &calls) != nil {
-			return nil, "", "", false
+			return completionResult{}, false
 		}
 	}
 	reason, ok := normalizeRuntimeFinish(profile, request, calls, c.Finish)
 	if c.Index != 0 || c.Message.Role != "assistant" || !ok || (c.Message.Content == nil && len(calls) == 0) {
-		return nil, "", "", false
+		return completionResult{}, false
 	}
 	if reason != c.Finish {
 		if data, ok = rewriteRuntimeFinish(data, reason); !ok {
-			return nil, "", "", false
+			return completionResult{}, false
 		}
 	}
 	content := ""
 	if c.Message.Content != nil {
 		content = *c.Message.Content
 	}
-	return data, content, reason, true
+	return completionResult{data: data, content: content, reason: reason, calls: calls, usage: r.Usage}, true
 }
 
 func validFinish(request Request, calls []ToolCall, reason string) bool {

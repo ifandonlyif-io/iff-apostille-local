@@ -12,11 +12,11 @@ Apostille Core 0.1. It is not a validated pharmaceutical system.
 
 | Surface | Preview scope |
 | --- | --- |
-| Inference | `GET /v1/models`, `POST /v1/chat/completions`, text only, one choice |
+| Inference | `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/messages` (Anthropic Messages subset, translated to the same local pipeline), text only, one choice |
 | Streaming | SSE chunks and `[DONE]`; disconnect cancels gateway/backend work |
 | Selection | Project-authorized active model; one active model per runtime deployment |
 | Structured output | Strict schema with a bounded keyword subset |
-| Customer integrations | OpenAI Chat Completions subset, project-scoped capability discovery, client-executed function calls |
+| Customer integrations | OpenAI Chat Completions subset, Anthropic Messages API subset, project-scoped capability discovery, client-executed function calls |
 | Evidence | Opt in using `X-Apostille-Record: metadata`; authenticated retrieval and exact-byte download by run ID |
 | Workflow evidence | Optional local CLI/SDK for signed workflow assertions, explicit receiver policy and offline archive verification |
 | SDK | Python 3.11+, sync/async, streaming context managers, token-file authentication |

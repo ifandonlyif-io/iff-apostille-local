@@ -21,7 +21,9 @@ different model/provider after a failure.
   test the exact deployment, including container forwarding rules.
 - Project tokens are bearer credentials. The configuration stores SHA-256 token
   digests; generate high-entropy tokens and protect raw token files. A digest is
-  not a substitute for sufficient token entropy.
+  not a substitute for sufficient token entropy. `POST /v1/messages` also
+  accepts the same token in `X-Api-Key` (exactly one of that header or
+  `Authorization: Bearer`), with the same hashing and constant-time comparison.
 - Model files and runtime images are supply-chain inputs. Verify manifests,
   fixed revisions, licenses and image digests before activation. Do not accept
   runtime downloads, remote model code, or unreviewed plugins.
@@ -48,6 +50,9 @@ An evidence response can be `pending`, `ready` or `failed`. `ready` means a
 metadata receipt is available; it is separate from the inference outcome. A
 cancelled or failed inference must never be relabeled successful simply because
 its receipt was signed. Receipt failure does not justify retrying inference.
+A success receipt is signed only after the gateway wrote and flushed the final
+output, which does not prove the client read it. The signed `completed_at` is
+the time the gateway finished validating that output, before sending it.
 
 The Core 0.1 producer signature proves that the holder of an embedded key signed
 a metadata assertion. It does not prove exact output content, execution of a

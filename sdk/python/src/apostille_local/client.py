@@ -395,13 +395,20 @@ class _SSE:
 
     def feed(self, block: bytes) -> Iterator[Response]:
         for b in block:
-            if self.done:
-                return
             if b == 10 and self.cr:
                 self.cr = False
                 continue
-            self.cr = b == 13
+            # Fold event CRLF delimiters, including the LF completing [DONE].
+            # After that delimiter, count every trailing byte toward the limit.
+            self.cr = b == 13 and not self.done
             self.size += 1
+            if self.done:
+                # After [DONE] only blank lines may remain until HTTP EOF.
+                # Keep the terminal event's reset size as the tail byte count.
+                if b not in (10, 13) or self.size > _MAX_EVENT:
+                    self.done = False
+                    raise APIError("invalid_stream", run_id=self.run_id)
+                continue
             if self.size > _MAX_EVENT:
                 raise APIError("stream_event_too_large", run_id=self.run_id)
             if b not in (10, 13):
@@ -421,7 +428,7 @@ class _SSE:
                 continue
             if payload == b"[DONE]":
                 self.done = True
-                return
+                continue
             try:
                 result = _json(payload, self.run_id)
             except APIError as exc:
@@ -443,10 +450,9 @@ class Stream:
     def __iter__(self) -> Iterator[Response]:
         parser = _SSE(self.run_id)
         try:
+            # Drain through EOF, after the gateway has settled the receipt.
             for block in self._response.iter_bytes():
                 yield from parser.feed(block)
-                if parser.done:
-                    return
         except httpx.TimeoutException:
             raise APIError("timeout", run_id=self.run_id) from None
         except httpx.HTTPError:
@@ -465,11 +471,10 @@ class AsyncStream:
     async def __aiter__(self) -> AsyncIterator[Response]:
         parser = _SSE(self.run_id)
         try:
+            # Drain through EOF, after the gateway has settled the receipt.
             async for block in self._response.aiter_bytes():
                 for result in parser.feed(block):
                     yield result
-                if parser.done:
-                    return
         except httpx.TimeoutException:
             raise APIError("timeout", run_id=self.run_id) from None
         except httpx.HTTPError:
