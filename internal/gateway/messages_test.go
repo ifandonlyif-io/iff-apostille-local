@@ -480,8 +480,8 @@ func TestMessagesCancellationFailsReceipt(t *testing.T) {
 	}
 }
 
-// The stream loop calls ready before completing a receipt, so every check that
-// could make commit report failure must live in ready.
+// The stream loop calls ready before writing buffered output. Validation
+// failures must be caught here; commit can still fail on write or flush errors.
 func TestMessagesSinkReadyGuardsCommit(t *testing.T) {
 	s := &messagesSink{}
 	valid := json.RawMessage(`{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}`)

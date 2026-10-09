@@ -142,7 +142,9 @@ Errors use an `error` object with stable `code`, sanitized `message` and `type`.
 No backend error text is returned. Distinguish authentication/authorization,
 inactive models, capacity limits, runtime failure and timeout. An HTTP failure
 or interrupted stream does not establish that no generation took place. Receipt
-status remains separate from the inference result; see the
+status remains separate from the inference result. Stream receipts are signed
+after the final output is written and flushed successfully; an immediate
+evidence query can still return `pending` while signing completes. See the
 [SDK evidence guide](../sdk/python/README.md).
 
 ## Runnable official Python client example
@@ -234,14 +236,16 @@ one `input_json_delta` carrying the complete arguments, `content_block_stop`)
 are emitted only after the whole runtime stream, finish reason, usage and
 structured/tool arguments validated. A response is final only when
 `message_delta` carries a non-null `stop_reason` **and** `message_stop` arrives.
-Any failure produces an `event: error` frame (`api_error`,
+Runtime validation failures produce an `event: error` frame (`api_error`,
 `invalid_runtime_stream`) and never a `message_delta` or `message_stop`. The
 SDK's `stream.get_final_message()` can return a partial snapshot if the
 connection ends early without an error event, so check `stop_reason is not None`
 before acting. Never run a tool from a partial stream; text already shown to a
 user is provisional until the final events arrive. Disable retries and close the
-response on cancellation; a disconnect produces a failed receipt, never a
-success receipt.
+response on cancellation. A detected write or flush failure leaves a failed
+receipt; an error frame may not reach a disconnected client. Receipt signing
+starts after the final stream output succeeds, so query evidence separately
+and allow for `pending` while signing completes.
 
 ### Errors
 

@@ -49,15 +49,19 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 		data := strings.Join(event, "\n")
 		event = nil
 		if data == "[DONE]" {
-			// The sink's own final checks run before finish(): a receipt must never
-			// complete for a stream the public protocol then reports as failed.
+			// Validate the whole stream before sending any buffered output.
 			if reason == "" || !validFinish(request, calls, reason) || (wantUsage && !gotUsage) || !validateOutput(s, content.String()) || !sink.ready(reason, usage) || r.Context().Err() != nil {
 				streamError()
 				return false
 			}
+			// Buffered content and terminal events must be written successfully
+			// before a success receipt can be created. A write/flush failure leaves
+			// the request incomplete so infer's deferred cleanup fails the receipt.
+			if !sink.commit(reason, calls, usage) {
+				return false
+			}
 			finish(reason)
 			done = true
-			sink.commit(reason, calls, usage)
 			return false
 		}
 		var chunk struct {

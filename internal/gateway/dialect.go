@@ -29,8 +29,10 @@ type chatSink struct{ w http.ResponseWriter }
 
 func (s *chatSink) emit(data string) bool {
 	_, e := fmt.Fprintf(s.w, "data: %s\n\n", strings.ReplaceAll(data, "\n", "\ndata: "))
-	s.w.(http.Flusher).Flush()
-	return e == nil
+	if e != nil {
+		return false
+	}
+	return http.NewResponseController(s.w).Flush() == nil
 }
 func (s *chatSink) start() bool                               { return true }
 func (s *chatSink) chunk(data, _ string) bool                 { return s.emit(data) }

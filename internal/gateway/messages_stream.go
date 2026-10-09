@@ -19,8 +19,10 @@ func (s *messagesSink) emit(event evt) bool {
 	b := encodeNoEscape(event)
 	// The encoder's trailing newline ends the data line; the second one ends the frame.
 	_, e := fmt.Fprintf(s.w, "event: %s\ndata: %s\n", event["type"], b)
-	s.w.(http.Flusher).Flush()
-	return e == nil
+	if e != nil {
+		return false
+	}
+	return http.NewResponseController(s.w).Flush() == nil
 }
 
 type evt map[string]any
@@ -45,7 +47,8 @@ func (s *messagesSink) chunk(_, text string) bool {
 
 func (s *messagesSink) usage(string, json.RawMessage) bool { return true }
 
-// ready runs before the receipt completes; commit then cannot fail validation.
+// ready validates the final metadata before commit writes buffered output.
+// commit can still fail to write or flush; only success permits a receipt.
 func (s *messagesSink) ready(reason string, usage json.RawMessage) bool {
 	_, ok := parseMessagesUsage(usage)
 	_, ok2 := messagesStopReason(reason)
