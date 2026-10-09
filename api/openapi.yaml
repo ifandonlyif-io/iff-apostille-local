@@ -161,6 +161,58 @@ paths:
               schema: {type: string}
         default:
           $ref: '#/components/responses/Error'
+  /v1/messages:
+    post:
+      operationId: createMessage
+      summary: Anthropic Messages API subset, served by the local model
+      description: >-
+        A translation layer over the same admission, validation, runtime call and
+        receipt pipeline as /v1/chat/completions. Nothing is sent to Anthropic and
+        the model is the administrator's local model; this is not full Anthropic
+        compatibility. Accepts the project token in X-Api-Key or Authorization:
+        Bearer (exactly one). Requires anthropic-version 2023-06-01 and rejects any
+        anthropic-beta header. Unknown fields, image/document/thinking blocks,
+        stop_sequences, top_k, metadata, cache_control, is_error true, assistant
+        prefill and non-custom tools are rejected. Errors use the Anthropic error
+        shape with a stable gateway code as message. Streaming tool_use blocks are
+        emitted only after the whole stream validated; a response is final only
+        after message_delta (with a stop_reason) and message_stop.
+      security:
+        - ProjectToken: []
+        - ApiKey: []
+      parameters:
+        - in: header
+          name: anthropic-version
+          required: true
+          schema: {const: '2023-06-01'}
+        - in: header
+          name: X-Apostille-Record
+          required: false
+          schema: {type: string, enum: [metadata]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessagesRequest'
+      responses:
+        '200':
+          description: Message JSON, or an SSE stream of Messages API events.
+          headers:
+            X-Apostille-Run-ID:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesResponse'
+            text/event-stream:
+              schema: {type: string}
+        default:
+          description: Anthropic-shaped sanitized error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesError'
   /local/v1/runs/{run_id}/evidence:
     get:
       operationId: getEvidence
@@ -216,6 +268,11 @@ components:
       type: http
       scheme: bearer
       description: High-entropy project token, provisioned through a restricted file by the operator.
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: The same project token, accepted on /v1/messages only.
   responses:
     Error:
       description: >-
@@ -235,6 +292,141 @@ components:
                   message: {type: string, description: 'Sanitized code; no upstream message.'}
                   type: {const: apostille_local_error}
   schemas:
+    MessagesRequest:
+      type: object
+      additionalProperties: false
+      required: [model, max_tokens, messages]
+      properties:
+        model: {type: string}
+        max_tokens: {type: integer, minimum: 1}
+        system:
+          oneOf:
+            - {type: string, minLength: 1}
+            - type: array
+              minItems: 1
+              maxItems: 1
+              items: {$ref: '#/components/schemas/MessagesTextBlock'}
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 128
+          description: The last message must have role user.
+          items:
+            type: object
+            additionalProperties: false
+            required: [role, content]
+            properties:
+              role: {enum: [user, assistant]}
+              content:
+                oneOf:
+                  - {type: string, minLength: 1}
+                  - type: array
+                    minItems: 1
+                    items:
+                      oneOf:
+                        - $ref: '#/components/schemas/MessagesTextBlock'
+                        - $ref: '#/components/schemas/MessagesToolUseBlock'
+                        - $ref: '#/components/schemas/MessagesToolResultBlock'
+        stream: {type: boolean}
+        temperature: {type: number, minimum: 0, maximum: 1}
+        top_p: {type: number, exclusiveMinimum: 0, maximum: 1}
+        tools:
+          type: array
+          minItems: 1
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, input_schema]
+            properties:
+              type: {const: custom}
+              name: {type: string}
+              description: {type: string}
+              strict: {type: boolean}
+              input_schema: {type: object, description: Bounded JSON Schema subset, as for Chat Completions tools.}
+        tool_choice:
+          type: object
+          required: [type]
+          properties:
+            type: {enum: [auto, any, none, tool]}
+            name: {type: string, description: Required for type tool only.}
+            disable_parallel_tool_use: {type: boolean, description: Not allowed with type none.}
+        output_config:
+          type: object
+          additionalProperties: false
+          required: [format]
+          properties:
+            format:
+              type: object
+              additionalProperties: false
+              required: [type, schema]
+              properties:
+                type: {const: json_schema}
+                schema: {type: object}
+    MessagesTextBlock:
+      type: object
+      additionalProperties: false
+      required: [type, text]
+      properties:
+        type: {const: text}
+        text: {type: string, minLength: 1}
+    MessagesToolUseBlock:
+      type: object
+      additionalProperties: false
+      required: [type, id, name, input]
+      properties:
+        type: {const: tool_use}
+        id: {type: string}
+        name: {type: string}
+        input: {type: object}
+    MessagesToolResultBlock:
+      type: object
+      additionalProperties: false
+      required: [type, tool_use_id]
+      properties:
+        type: {const: tool_result}
+        tool_use_id: {type: string}
+        content:
+          oneOf:
+            - {type: string}
+            - type: array
+              minItems: 1
+              maxItems: 1
+              items: {$ref: '#/components/schemas/MessagesTextBlock'}
+        is_error: {const: false}
+    MessagesResponse:
+      type: object
+      required: [id, type, role, model, content, stop_reason, stop_sequence, usage]
+      properties:
+        id: {type: string, description: 'msg_ followed by the run ID.'}
+        type: {const: message}
+        role: {const: assistant}
+        model: {type: string}
+        content:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/MessagesTextBlock'
+              - $ref: '#/components/schemas/MessagesToolUseBlock'
+        stop_reason: {enum: [end_turn, max_tokens, tool_use]}
+        stop_sequence: {type: 'null'}
+        usage:
+          type: object
+          required: [input_tokens, output_tokens]
+          properties:
+            input_tokens: {type: integer}
+            output_tokens: {type: integer}
+    MessagesError:
+      type: object
+      required: [type, error]
+      properties:
+        type: {const: error}
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type: {enum: [invalid_request_error, authentication_error, permission_error, not_found_error, request_too_large, rate_limit_error, api_error]}
+            message: {type: string, description: Stable gateway code; no backend text.}
     Capabilities:
       type: object
       required: [object, contract_version, api_family, gateway_version, models, evidence, tool_execution, unsupported]
@@ -271,6 +463,15 @@ components:
           properties:
             metadata: {type: boolean}
             retention_seconds: {const: 86400}
+        compatible_apis:
+          type: array
+          items:
+            type: object
+            required: [family, path, anthropic_version]
+            properties:
+              family: {const: anthropic_messages}
+              path: {const: /v1/messages}
+              anthropic_version: {const: '2023-06-01'}
         tool_execution: {const: client}
         unsupported:
           type: array

@@ -1,3 +1,5 @@
-# Test-only customer client; never part of gateway or Apostille SDK runtime.
+# Test-only customer clients; never part of gateway or Apostille SDK runtime.
 openai==2.29.0
 httpx==0.28.1
+# anthropic 1.x runs on httpx2/httpcore2, so it does not conflict with the pinned httpx above.
+anthropic==1.8.0

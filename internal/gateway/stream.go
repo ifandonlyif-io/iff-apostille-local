@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -13,22 +12,25 @@ import (
 	schema "github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader, request Request, s *schema.Schema, finish func(string), runtimeProfile string) {
+// streamSink receives only events that already passed runtime validation. The
+// loop below owns every check; sinks only encode the public protocol.
+type streamSink interface {
+	start() bool
+	chunk(data, text string) bool
+	usage(data string, usage json.RawMessage) bool
+	ready(reason string, usage json.RawMessage) bool
+	commit(reason string, calls []ToolCall, usage json.RawMessage) bool
+	fail()
+}
+
+func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader, request Request, s *schema.Schema, finish func(string), runtimeProfile string, sink streamSink) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(200)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok || !sink.start() {
 		return
 	}
-	emit := func(data string) bool {
-		_, e := fmt.Fprintf(w, "data: %s\n\n", strings.ReplaceAll(data, "\n", "\ndata: "))
-		flusher.Flush()
-		return e == nil
-	}
-	streamError := func() {
-		emit(`{"error":{"code":"invalid_runtime_stream","message":"invalid_runtime_stream","type":"apostille_local_error"}}`)
-	}
+	streamError := sink.fail
 	scanner := bufio.NewScanner(io.LimitReader(body, maxResponse+1))
 	scanner.Buffer(make([]byte, 4096), 256<<10)
 	var event []string
@@ -37,6 +39,7 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 	wantUsage := request.StreamOptions != nil && request.StreamOptions.IncludeUsage
 	gotUsage := false
 	reason := ""
+	var usage json.RawMessage
 	total := 0
 	done := false
 	consume := func() bool {
@@ -46,13 +49,15 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 		data := strings.Join(event, "\n")
 		event = nil
 		if data == "[DONE]" {
-			if reason == "" || !validFinish(request, calls, reason) || (wantUsage && !gotUsage) || !validateOutput(s, content.String()) || r.Context().Err() != nil {
+			// The sink's own final checks run before finish(): a receipt must never
+			// complete for a stream the public protocol then reports as failed.
+			if reason == "" || !validFinish(request, calls, reason) || (wantUsage && !gotUsage) || !validateOutput(s, content.String()) || !sink.ready(reason, usage) || r.Context().Err() != nil {
 				streamError()
 				return false
 			}
 			finish(reason)
 			done = true
-			emit("[DONE]")
+			sink.commit(reason, calls, usage)
 			return false
 		}
 		var chunk struct {
@@ -80,8 +85,8 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 				streamError()
 				return false
 			}
-			gotUsage = true
-			return emit(data)
+			gotUsage, usage = true, chunk.Usage
+			return sink.usage(data, chunk.Usage)
 		}
 		if len(chunk.Choices) != 1 || reason != "" || !validUsage(chunk.Usage, false) {
 			streamError()
@@ -110,7 +115,7 @@ func (g *Gateway) stream(w http.ResponseWriter, r *http.Request, body io.Reader,
 			reason = adaptedReason
 		}
 		// Each event was parsed before it is forwarded; malformed backend error bodies never escape.
-		return emit(data)
+		return sink.chunk(data, c.Delta.Content)
 	}
 	for scanner.Scan() {
 		line := scanner.Text()

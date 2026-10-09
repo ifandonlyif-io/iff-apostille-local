@@ -21,7 +21,9 @@ different model/provider after a failure.
   test the exact deployment, including container forwarding rules.
 - Project tokens are bearer credentials. The configuration stores SHA-256 token
   digests; generate high-entropy tokens and protect raw token files. A digest is
-  not a substitute for sufficient token entropy.
+  not a substitute for sufficient token entropy. `POST /v1/messages` also
+  accepts the same token in `X-Api-Key` (exactly one of that header or
+  `Authorization: Bearer`), with the same hashing and constant-time comparison.
 - Model files and runtime images are supply-chain inputs. Verify manifests,
   fixed revisions, licenses and image digests before activation. Do not accept
   runtime downloads, remote model code, or unreviewed plugins.

@@ -43,6 +43,17 @@ notices bundle. In particular, certifi's certificate data and MPL obligations ar
 separate from this repository's MIT license. Keep the selected certificate bundle
 and trust policy under the customer's update process.
 
+Test-only customer clients (`tests/requirements-interop.txt`) are never gateway
+or SDK dependencies. The Anthropic client resolves to `httpx2`/`httpcore2`
+(separate distributions from the SDK's `httpx`), checked against the metadata of
+the 2026-10-09 clean test installation:
+
+| Component | Selected version | License / upstream source |
+| --- | --- | --- |
+| anthropic | `1.8.0` | [MIT](https://github.com/anthropics/anthropic-sdk-python/blob/v1.8.0/LICENSE) |
+| httpx2 | `2.13.1` | BSD-3-Clause (package metadata) |
+| httpcore2 | `2.13.1` | BSD-3-Clause (package metadata) |
+
 Build/test utilities (for example setuptools, build, OpenAPI validation tools and
 their dependencies) are not part of the SDK's declared runtime dependency list.
 Include them in a build-environment SBOM if distributing that environment.

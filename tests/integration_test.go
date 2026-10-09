@@ -86,6 +86,9 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 				<-r.Context().Done()
 				return
 			}
+			if request.Messages[0].Content == "invalid-stream" {
+				return // no finish event or [DONE]: the gateway must fail the stream
+			}
 			encodeEvent(map[string]any{}, finish)
 			if request.StreamOptions != nil && request.StreamOptions.IncludeUsage {
 				b, _ := json.Marshal(map[string]any{"id": "chatcmpl-synthetic", "object": "chat.completion.chunk", "created": 1, "model": "qwen3-4b", "choices": []any{}, "usage": usage})
@@ -165,6 +168,12 @@ func TestPythonSDKAgainstTLSGateway(t *testing.T) {
 	interop := exec.Command(python, "openai_live.py", server.URL, ca, paths[0], paths[1])
 	if output, err := interop.CombinedOutput(); err != nil {
 		t.Fatalf("official OpenAI SDK integration: %v\n%s", err, output)
+	} else {
+		t.Log(string(output))
+	}
+	anthropic := exec.Command(python, "anthropic_live.py", server.URL, ca, paths[0], paths[1])
+	if output, err := anthropic.CombinedOutput(); err != nil {
+		t.Fatalf("official Anthropic SDK integration: %v\n%s", err, output)
 	} else {
 		t.Log(string(output))
 	}

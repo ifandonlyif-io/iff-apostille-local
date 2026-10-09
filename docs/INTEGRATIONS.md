@@ -58,6 +58,7 @@ the gateway does not. Enforce network policy at the host as described in
     }
   }],
   "evidence": {"metadata": false, "retention_seconds": 86400},
+  "compatible_apis": [{"family": "anthropic_messages", "path": "/v1/messages", "anthropic_version": "2023-06-01"}],
   "tool_execution": "client",
   "unsupported": ["responses", "embeddings", "multimodal", "server_tool_execution"]
 }
@@ -164,6 +165,128 @@ completion status. Add `--tool-demo` for a synthetic local lookup roundtrip afte
 the administrator has enabled and qualified tool calling. It neither prints nor
 persists prompts, answers, tool arguments or keys. Real tool execution belongs
 in the customer's authorization and sandbox boundary.
+
+## Anthropic Messages API subset
+
+`POST /v1/messages` lets an application written for the official Anthropic SDK
+use the same validated, locally served inference as Chat Completions. The gateway
+translates the request into its internal Chat Completions request, runs it through
+the same admission, validation, model checks, receipts and runtime response
+validation, and translates the validated result back. **Requests never go to
+Anthropic.** The model is the administrator's local model, not Claude. Do not put a
+real Anthropic API key in the client, and do not describe this endpoint as Claude
+or as fully Anthropic compatible. The exact field contract is in
+[OpenAPI](../api/openapi.yaml).
+
+### Connection settings
+
+| Setting | Value |
+| --- | --- |
+| Base URL | `https://gateway.example.internal:8443` **without** `/v1` (the SDK appends `/v1/messages`) |
+| Authentication | The project token as `api_key` (`X-Api-Key`) **or** as `auth_token` (`Authorization: Bearer`). Exactly one; sending both is rejected with 401 |
+| Version header | `anthropic-version: 2023-06-01` (the SDK default); any other value is rejected. Any `anthropic-beta` header is rejected |
+| Retries | `max_retries=0` |
+| TLS trust | Customer CA through an explicit HTTP client, `trust_env=False`, `follow_redirects=False` |
+| Environment | Pass credentials explicitly; remove `ANTHROPIC_LOG` and `ANTHROPIC_CUSTOM_HEADERS` before importing the SDK; no environment proxies |
+
+Discovery stays on `GET /local/v1/capabilities` (Bearer), which lists the family
+under `compatible_apis`. `GET /v1/models` keeps its OpenAI-style shape.
+
+### Supported subset
+
+| Feature | Contract |
+| --- | --- |
+| Request fields | `model`, `max_tokens` (required, within the model limit), `messages`, `system`, `stream`, `temperature` (0..1), `top_p`, `tools`, `tool_choice`, `output_config` |
+| `system` | A non-empty string, or one text block |
+| Messages | `user`/`assistant` with string content or blocks; at most one text block per message; the last message must be `user` |
+| User blocks | `text`; `tool_result` with string or one-text-block `content` (all results before the text block) |
+| Assistant blocks | `text` (before any tool use) and `tool_use` |
+| Tools | Custom tools: `name`, `description`, `input_schema` (same bounded schema subset as Chat Completions), `strict`, optional `type: "custom"` |
+| `tool_choice` | `auto`, `any`, `none`, `tool` (named), with optional `disable_parallel_tool_use` (not with `none`) |
+| Structured output | `output_config.format` of type `json_schema` only; not combinable with a non-`none` tool choice |
+| Streaming | `stream: true`; usage is always requested internally |
+| Receipts | Optional `X-Apostille-Record: metadata`, as on Chat Completions |
+
+Current SDK releases (for example 1.8.0) expose no `temperature`/`top_p`
+arguments; send them with `extra_body` if needed.
+
+### Mapping
+
+| Gateway/runtime | Messages API |
+| --- | --- |
+| `stop` / `length` / `tool_calls` | `end_turn` / `max_tokens` / `tool_use` (`stop_sequence` is always `null`) |
+| `prompt_tokens` / `completion_tokens` | `usage.input_tokens` / `usage.output_tokens`; runtime usage is required |
+| Message id | `msg_` followed by the run ID (`X-Apostille-Run-ID`) |
+| Text content | One `text` block when non-empty; `content` may be `[]` |
+| Assistant `tool_use` (`id`, `name`, `input`) | Internal tool call; `input` is passed through as compact JSON |
+| User `tool_result` | One internal `tool` message per result, then the text block as a `user` message |
+| Generated tool call | `tool_use` block with the validated arguments object as `input` |
+
+The same tool rules as Chat Completions apply: IDs must pair, tool input must be a
+JSON object, strict definitions enforce their schema, and the customer
+application must authorize every action. Tools are never executed by the gateway.
+
+### Streaming commit rule
+
+Text deltas are forwarded as they pass validation, but tool calls are not: their
+arguments stay in a bounded buffer and `tool_use` blocks (`content_block_start`,
+one `input_json_delta` carrying the complete arguments, `content_block_stop`)
+are emitted only after the whole runtime stream, finish reason, usage and
+structured/tool arguments validated. A response is final only when
+`message_delta` carries a non-null `stop_reason` **and** `message_stop` arrives.
+Any failure produces an `event: error` frame (`api_error`,
+`invalid_runtime_stream`) and never a `message_delta` or `message_stop`. The
+SDK's `stream.get_final_message()` can return a partial snapshot if the
+connection ends early without an error event, so check `stop_reason is not None`
+before acting. Never run a tool from a partial stream; text already shown to a
+user is provisional until the final events arrive. Disable retries and close the
+response on cancellation; a disconnect produces a failed receipt, never a
+success receipt.
+
+### Errors
+
+Errors use `{"type":"error","error":{"type":<Anthropic type>,"message":<code>}}`
+with the same status codes as Chat Completions. `message` is a stable gateway
+code such as `unsupported_or_invalid_field`, `model_forbidden`,
+`anthropic_version_unsupported` or `beta_not_supported`; no backend text is
+returned. Types: 400/409/415 `invalid_request_error`, 401 `authentication_error`,
+403 `permission_error`, 404 `not_found_error`, 413 `request_too_large`, 429
+`rate_limit_error`, 5xx `api_error`. Global checks (a query string is rejected
+with `query_not_supported`) use the gateway's own error shape.
+
+Receipts are unchanged: the manifest records the internal finish reasons
+(`stop`, `length`, `tool_calls`), not the Messages names, and contains no prompt,
+answer or tool arguments.
+
+### Not supported
+
+Claude Code and the Claude Agent SDK as clients, `/v1/messages/count_tokens`,
+an Anthropic-shaped `/v1/models`, the beta namespace (`?beta=true`,
+`anthropic-beta`), batches, files, images and documents, thinking,
+prompt caching (`cache_control`), server tools and MCP, `stop_sequences`,
+`top_k`, `metadata`, `citations`, `tool_result` with `is_error: true` (put error
+details in the result content instead), assistant prefill (a final `assistant`
+message), and `eager_input_streaming`. These are rejected, not ignored.
+
+### Runnable Anthropic client example
+
+The [example](../examples/anthropic_client.py) uses `anthropic==1.8.0`, which runs
+on `httpx2`. These are example/test dependencies only, not additions to the
+Apostille Local SDK; prepare them like any other customer dependency.
+
+```sh
+python -m pip install anthropic==1.8.0
+python examples/anthropic_client.py \
+  --base-url https://gateway.example.internal:8443 \
+  --ca-file /etc/apostille/customer-ca.pem \
+  --token-file /run/secrets/apostille-project-token
+```
+
+It discovers capabilities, runs a synthetic greeting and prints only a
+completion status; `--tool-demo` adds a synthetic local lookup round trip. The
+[executable test](../tests/anthropic_live.py) exercises the SDK's `create`,
+`stream`, tools, structured output, typed errors, cancellation and async client
+against a synthetic runtime.
 
 ## Framework adoption checklist
 
