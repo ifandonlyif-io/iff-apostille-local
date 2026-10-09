@@ -14,7 +14,7 @@ of all required license texts**.
 | santhosh-tekuri/jsonschema | `v6.0.2` | [Apache-2.0](https://github.com/santhosh-tekuri/jsonschema/blob/v6.0.2/LICENSE) |
 | cyberphone/json-canonicalization | `19d51d7fe467` (2024-12-13 pseudo-version) | [Apache-2.0](https://github.com/cyberphone/json-canonicalization/blob/19d51d7fe467/LICENSE), copyright 2018 Anders Rundgren |
 | golang.org/x/text | `v0.41.0` | [BSD-3-Clause](https://cs.opensource.google/go/x/text/+/refs/tags/v0.41.0:LICENSE), copyright The Go Authors |
-| Go standard library / selected toolchain | `go1.26.6` | [Go license](https://go.dev/LICENSE), BSD-3-Clause; included vendored components may have additional notices |
+| Go standard library / selected toolchain | `go1.26.9` | [Go license](https://go.dev/LICENSE), BSD-3-Clause; included vendored components may have additional notices |
 
 `go.mod` and `go.sum` are authoritative for the actual dependency versions and
 module checksums. The license inventory must be refreshed when they change.
@@ -48,6 +48,21 @@ their dependencies) are not part of the SDK's declared runtime dependency list.
 Include them in a build-environment SBOM if distributing that environment.
 
 ## Runtime and model exclusions
+
+### Optional Flower integration
+
+The source-only CPU demonstration directly pins `flwr==1.39.0` (Apache-2.0,
+[upstream](https://github.com/flwrlabs/flower)) and `numpy==2.2.6` (BSD-3-Clause,
+[upstream](https://github.com/numpy/numpy)) in
+[`tests/requirements-flower.txt`](../tests/requirements-flower.txt). These are
+optional integration/test dependencies, not native SDK or Go gateway runtime
+dependencies. No upstream framework source is vendored here. The requirement
+file pins direct dependencies; it is not a complete transitive hash lock.
+Inventory all resolved packages and preserve their actual license texts before
+redistributing a Flower environment. That environment is excluded from the
+native SDK preview wheelhouse and its SPDX inventory.
+
+### Inference deployment
 
 No inference container, GPU driver, model weight, tokenizer, remote-code plugin or
 vendor management package is licensed by this repository's MIT license. The

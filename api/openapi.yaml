@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
   title: Apostille Local
-  version: 0.1.0-alpha.1
+  version: 0.1.0-alpha.2
   description: >-
-    Experimental, project-authenticated text inference gateway. No tools, RAG,
+    Experimental, project-authenticated text inference gateway. Function-call
+    messages are supported; tool execution belongs to the client. No RAG,
     cloud fallback or model administration API. Receipts are optional signed
     metadata assertions, not proof of output content or actual model execution.
 servers:
@@ -51,9 +52,30 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [id]
+                      required: [id, object, created, owned_by]
                       properties:
                         id: {type: string}
+                        object: {const: model}
+                        created: {const: 0, description: 'Placeholder; no model creation timestamp is asserted.'}
+                        owned_by: {const: local}
+        default:
+          $ref: '#/components/responses/Error'
+  /local/v1/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: Discover project-visible inference features and configured limits
+      description: >-
+        Includes only the healthy active model authorized for the caller, or an
+        empty models array. Does not expose other projects, the inactive catalog,
+        paths, secrets or model administration. Readiness and configured features
+        are not hardware qualification or a capacity reservation.
+      responses:
+        '200':
+          description: Versioned integration contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
         default:
           $ref: '#/components/responses/Error'
   /v1/chat/completions:
@@ -61,8 +83,12 @@ paths:
       operationId: createChatCompletion
       summary: Generate one text completion or SSE stream
       description: >-
-        Unknown request fields are rejected, including n, tools, tool_choice,
-        functions, seed and stream_options. Content must be nonempty text.
+        Unknown request fields are rejected, including functions, seed, store
+        and multimodal content. One choice only. Function calling requires the
+        active model's administrator-enabled parser; the client executes tools.
+        Tool history must pair every call with one result before subsequent
+        messages. Tool arguments must be JSON objects; strict function definitions
+        additionally enforce the declared bounded schema.
         No automatic retry: a network failure can occur after work has started.
         The run header is available once the gateway accepts a run.
         Request bodies are capped at 1 MiB. Runtime responses/streams are capped
@@ -85,8 +111,9 @@ paths:
             JSON completion, or SSE data events containing OpenAI-style choice
             deltas followed by data: [DONE]. A stream error may occur after HTTP
             headers are sent. A missing [DONE] indicates an incomplete stream.
-            Structured-output deltas are provisional until final validation
-            succeeds and [DONE] is received.
+            Structured-output and tool-argument deltas are provisional until
+            final validation succeeds and [DONE] is received. Requested usage is
+            a final chunk with an empty choices array before [DONE].
           headers:
             X-Apostille-Run-ID:
               schema: {type: string}
@@ -111,11 +138,22 @@ paths:
                         index: {type: integer}
                         message:
                           type: object
-                          required: [role, content]
+                          required: [role]
+                          anyOf:
+                            - required: [content]
+                              properties:
+                                content: {type: string}
+                            - required: [tool_calls]
+                              properties:
+                                tool_calls: {minItems: 1}
                           properties:
                             role: {const: assistant}
-                            content: {type: string}
-                        finish_reason: {type: [string, 'null']}
+                            content: {type: [string, 'null']}
+                            tool_calls:
+                              type: array
+                              maxItems: 16
+                              items: {$ref: '#/components/schemas/ToolCall'}
+                        finish_reason: {enum: [stop, length, tool_calls]}
                   usage:
                     type: object
                     description: Runtime-reported token counts when available.
@@ -191,20 +229,137 @@ components:
             properties:
               error:
                 type: object
+                required: [code, message, type]
                 properties:
                   code: {type: string}
+                  message: {type: string, description: 'Sanitized code; no upstream message.'}
+                  type: {const: apostille_local_error}
   schemas:
-    Message:
+    Capabilities:
+      type: object
+      required: [object, contract_version, api_family, gateway_version, models, evidence, tool_execution, unsupported]
+      properties:
+        object: {const: apostille_local.capabilities}
+        contract_version: {const: '1'}
+        api_family: {const: chat_completions}
+        gateway_version: {type: string}
+        models:
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            required: [id, max_context, max_output_tokens, max_concurrent_requests, features]
+            properties:
+              id: {type: string}
+              max_context: {type: integer, minimum: 128}
+              max_output_tokens: {type: integer, minimum: 1}
+              max_concurrent_requests: {type: integer, minimum: 1}
+              features:
+                type: object
+                required: [text, streaming, stream_usage, json_schema, tool_calling]
+                properties:
+                  text: {const: true}
+                  streaming: {const: true}
+                  stream_usage: {const: true}
+                  json_schema: {const: true}
+                  tool_calling:
+                    type: boolean
+                    description: Operator-enabled parser; not a claim that tools execute on the gateway.
+        evidence:
+          type: object
+          required: [metadata, retention_seconds]
+          properties:
+            metadata: {type: boolean}
+            retention_seconds: {const: 86400}
+        tool_execution: {const: client}
+        unsupported:
+          type: array
+          items: {type: string}
+          example: [responses, embeddings, multimodal, server_tool_execution]
+    ToolCall:
       type: object
       additionalProperties: false
-      required: [role, content]
+      required: [id, type, function]
       properties:
-        role: {type: string, enum: [system, user, assistant]}
-        content: {type: string, minLength: 1}
+        id: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}
+        type: {const: function}
+        function:
+          type: object
+          additionalProperties: false
+          required: [name, arguments]
+          properties:
+            name: {type: string, pattern: '^[A-Za-z0-9_-]{1,64}$'}
+            arguments:
+              type: string
+              description: Valid JSON object encoded as a string; at most 64 KiB of UTF-8 bytes.
+    Tool:
+      type: object
+      additionalProperties: false
+      required: [type, function]
+      properties:
+        type: {const: function}
+        function:
+          type: object
+          additionalProperties: false
+          required: [name, parameters]
+          properties:
+            name: {type: string, pattern: '^[A-Za-z0-9_-]{1,64}$'}
+            description:
+              type: string
+              description: At most 4096 UTF-8 bytes.
+            strict: {type: boolean}
+            parameters:
+              type: object
+              required: [type]
+              description: >-
+                Bounded schema subset described under response_format; root type
+                must be object. strict=true validates generated arguments against
+                this schema before successful completion.
+              properties:
+                type: {const: object}
+    Message:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [role, content]
+          properties:
+            role: {enum: [system, user]}
+            content: {type: string, minLength: 1}
+        - type: object
+          additionalProperties: false
+          required: [role]
+          properties:
+            role: {const: assistant}
+            content: {type: [string, 'null']}
+            tool_calls:
+              type: array
+              maxItems: 16
+              items: {$ref: '#/components/schemas/ToolCall'}
+          anyOf:
+            - required: [content]
+              properties:
+                content: {type: string, minLength: 1}
+            - required: [tool_calls]
+              properties:
+                tool_calls: {minItems: 1}
+        - type: object
+          additionalProperties: false
+          required: [role, content, tool_call_id]
+          properties:
+            role: {const: tool}
+            content: {type: string}
+            tool_call_id: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}
     ChatRequest:
       type: object
       additionalProperties: false
       required: [model, messages]
+      not:
+        required: [max_tokens, max_completion_tokens]
+      dependentSchemas:
+        stream_options:
+          required: [stream]
+          properties:
+            stream: {const: true}
       properties:
         model: {type: string, minLength: 1}
         messages:
@@ -216,6 +371,51 @@ components:
         temperature: {type: number, minimum: 0, maximum: 2}
         top_p: {type: number, exclusiveMinimum: 0, maximum: 1}
         max_tokens: {type: integer, minimum: 1}
+        max_completion_tokens:
+          type: integer
+          minimum: 1
+          description: Alias for max_tokens; mutually exclusive. Bounded by the model output limit.
+        n: {const: 1}
+        stop:
+          description: Each sequence is nonempty and at most 1024 UTF-8 bytes.
+          oneOf:
+            - {type: string, minLength: 1}
+            - type: array
+              minItems: 1
+              maxItems: 4
+              items: {type: string, minLength: 1}
+        stream_options:
+          type: object
+          additionalProperties: false
+          required: [include_usage]
+          properties:
+            include_usage: {type: boolean}
+        tools:
+          type: array
+          maxItems: 64
+          description: Unique function names; active model must have tool calling enabled.
+          items: {$ref: '#/components/schemas/Tool'}
+        tool_choice:
+          description: >-
+            Defaults to auto with tools and none without. Non-none choices require
+            tool definitions. Named choices must reference a declared function.
+            response_format requires effective tool_choice none.
+          oneOf:
+            - {type: string, enum: [none, auto, required]}
+            - type: object
+              additionalProperties: false
+              required: [type, function]
+              properties:
+                type: {const: function}
+                function:
+                  type: object
+                  additionalProperties: false
+                  required: [name]
+                  properties:
+                    name: {type: string, pattern: '^[A-Za-z0-9_-]{1,64}$'}
+        parallel_tool_calls:
+          type: boolean
+          description: Requires nonempty tool definitions. false permits at most one generated call.
         response_format:
           type: object
           additionalProperties: false

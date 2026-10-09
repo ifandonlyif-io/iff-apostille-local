@@ -1,8 +1,6 @@
 module github.com/ifandonlyif-io/iff-apostille-local
 
-go 1.25.0
-
-toolchain go1.26.6
+go 1.26.9
 
 require (
 	github.com/ifandonlyif-io/iff-apostille v0.1.0-alpha.1

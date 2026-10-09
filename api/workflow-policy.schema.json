@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:apostille:workflow-policy:0.1",
+  "title": "Independently selected workflow receiver policy",
+  "description": "Select project, job and exact producer pins independently of evidence. Duplicate agent_id/key_id pairs are rejected by the verifier, including pairs with differing permission sets. Permissions authorize statement types, not training execution or deployment admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "project_id",
+    "job_id",
+    "producers"
+  ],
+  "properties": {
+    "schema": {
+      "const": "urn:apostille:workflow-policy:0.1"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    },
+    "producers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent_id",
+          "key_id",
+          "event_types"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            "not": {
+              "pattern": "[\\r\\n]"
+            }
+          },
+          "key_id": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "not": {
+              "pattern": "[\\r\\n]"
+            }
+          },
+          "event_types": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "configuration_approved",
+                "work_completed",
+                "work_failed",
+                "work_cancelled",
+                "model_released",
+                "deployment_accepted"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

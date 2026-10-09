@@ -3,26 +3,57 @@
 No registry publication, signing-key creation, hardware purchase or production
 deployment is implied by building this repository.
 
+## Current preview and receipt compatibility
+
+The Local software preview is **`0.1.0-alpha.2`**; its Python distribution uses
+**`0.1.0a2`**. The gateway reports this software version, the OpenAPI document
+identifies it, and `make preview` writes `dist/0.1.0-alpha.2/`. This is separate
+from the unchanged Apostille Core dependency **`v0.1.0-alpha.1`** and Core 0.1 wire
+format. It does not indicate a package-registry release or hardware qualification.
+
+Local alpha.2 adds receipts whose `finish_reason` may be `tool_calls`, alongside
+`stop` and `length`. The original Local alpha.1 verifier rejects `tool_calls`
+receipts. Distribute the alpha.2 gateway, SDK and `apostille-local-verify` together;
+upgrade receivers' offline verifier before enabling tool-call receipt exchange.
+The alpha.2 verifier continues to accept valid alpha.1 `stop`/`length` receipts.
+Tool-call receipts describe the completed generation's metadata; they do not
+prove a tool ran, its result, or the truth of generated content.
+
+Preview outputs are immutable build destinations. The build reserves a new output
+directory **before compiling, building wheels or downloading dependencies** and
+refuses an existing directory, including an incomplete build. Manifest generation
+also requires that fresh reservation and permits one finalization attempt. It
+refuses an already generated manifest or checksum file. An override such as
+`VERSION=0.1.0-alpha.1` is rejected when it differs from the source's coordinated
+Local versions. Preserve prior preview bundles and checksums; do not relabel or
+replace alpha.1 artifacts with alpha.2 bytes. After an interrupted build, inspect
+and move the incomplete directory aside before rebuilding into a fresh destination.
+
 ## Software gates
 
 From a clean, reviewed checkout:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ./sdk/python build packaging
+.venv/bin/python -m pip install -e ./sdk/python build packaging -r tests/requirements-framework.txt
 make PYTHON=.venv/bin/python check
 make fuzz
 make PYTHON=.venv/bin/python preview
 ```
 
-`make check` covers Go tests, race detection, vet, Python unittest, the real
-gateway/SDK integration test and host command builds. `make fuzz` exercises the
+`make check` covers Go tests, race detection, vet, Python unittest, both vendor
+Compose renders, API checker regressions, real TLS gateway integration with the
+native SDK, pinned OpenAI and LangChain clients, and host command builds. Install
+Docker Compose v2; no daemon is required for this configuration check. OpenAI and
+LangChain are test dependencies only; they are not included in the native SDK
+wheelhouse or its deployment SBOM. `make fuzz` exercises the
 gateway JSON parser. `make preview` builds Linux amd64 binaries, Python wheel/sdist
 and a local bundle under `dist/<VERSION>/`. It runs no Docker/GPU qualification
 and performs no registry publication or customer rollout.
 
-The preview generator writes `SHA256SUMS`, `PREVIEW.json`, resolved Python runtime
-versions and `software.spdx.json`, with collected third-party license files. The
+The preview generator writes `SHA256SUMS`, `PREVIEW.json` (including Local and SDK
+software versions), resolved Python runtime versions and `software.spdx.json`,
+with collected third-party license files. The
 SPDX inventory covers Go modules/standard library and the SDK's runtime dependencies
 from the bundled wheels. It does not cover the inference image, GPU
 driver, model artifacts or Python interpreter. It is **not a complete customer
@@ -45,6 +76,15 @@ image digests, model revisions/manifests and backend artifacts. Core 0.1 remains
 the exact dependency version selected in `go.mod`.
 
 ## Required release artifacts
+
+The preview also builds `apostille-workflow`, includes its event/policy schemas,
+and packages the generic Python recorder in the native SDK wheel. The optional
+Flower adapter/example is tested from the source checkout; Flower and its
+transitive training dependencies are not in the native SDK wheelhouse or its
+SBOM. Before shipping that integration for isolated customer use, prepare a
+separate fully pinned wheel inventory, license bundle and dependency scan, run
+`make flower-test`, and complete the actual deployment acceptance. The synthetic
+CPU demonstration is not that acceptance.
 
 - Source revision and release notes with known limitations and supported tuple.
 - Gateway/operator binaries with SHA-256 checksums and target OS/architecture.

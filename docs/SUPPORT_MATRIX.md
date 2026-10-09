@@ -6,6 +6,8 @@
 | --- | --- | --- |
 | Gateway with synthetic/mock runtime | Software checks only | Run repository Go checks. |
 | Python sync/async SDK with MockTransport | Software checks only | Run SDK unittest suite. |
+| Native SDK, OpenAI Python 2.29.0 and LangChain OpenAI 1.1.11 | TLS gateway interoperability with synthetic runtime | `make integration`; no real model/GPU qualification. |
+| AMD/NVIDIA Compose configuration | Software checks only | `make compose-check`; renders both configurations without a Docker daemon. |
 | Docker Compose deployment | **Not verified / P4 open** | Initial environment has no running Docker daemon. |
 | NVIDIA GPU + pinned runtime + approved model | **Not verified / P4 open** | No real GPU acceptance run. |
 | AMD GPU + pinned runtime + approved model | **Not verified / P4 open** | No real GPU acceptance run. |

@@ -12,6 +12,32 @@ url, ca_file, token_a, token_b, verifier, producer_pin, exports = sys.argv[1:]
 exports = Path(exports)
 options = dict(base_url=url, ca_file=ca_file, token_file=token_a)
 messages = [{"role": "user", "content": "SYNTHETIC_PRIVATE_INPUT"}]
+tools = [{"type": "function", "function": {"name": "lookup_demo", "strict": True,
+          "parameters": {"type": "object", "properties": {"code": {"type": "string"}},
+                         "required": ["code"], "additionalProperties": False}}}]
+named_choice = {"type": "function", "function": {"name": "lookup_demo"}}
+
+
+def reply_history(response):
+    choice = response["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    calls = choice["message"]["tool_calls"]
+    assert len(calls) == 1 and calls[0]["function"]["name"] == "lookup_demo"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"code": "TEST-001"}
+    return messages + [{"role": "assistant", "content": None, "tool_calls": calls},
+                       {"role": "tool", "tool_call_id": calls[0]["id"], "content": "SYNTHETIC_PRIVATE_TOOL_RESULT"}]
+
+
+def check_tool_stream(chunks):
+    assert chunks[-1]["choices"] == []
+    assert chunks[-1]["usage"] == {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    choices = [chunk["choices"][0] for chunk in chunks if chunk["choices"]]
+    assert choices[-1]["finish_reason"] == "tool_calls"
+    fragments = [call for choice in choices for call in choice.get("delta", {}).get("tool_calls", [])]
+    assert fragments[0]["id"]
+    assert all(call["index"] == 0 for call in fragments)
+    arguments = "".join(call.get("function", {}).get("arguments", "") for call in fragments)
+    assert json.loads(arguments) == {"code": "TEST-001"}
 
 
 def verify_download(files, run_id, *, negative_checks=False):
@@ -64,11 +90,15 @@ def check_receipt(client, result):
 
 with Client(**options) as client:
     assert client.models.list()["data"][0]["id"] == "qwen3-4b"
+    capabilities = client.capabilities.get()
+    assert capabilities["tool_execution"] == "client"
+    assert capabilities["models"][0]["features"]["tool_calling"] is True
     response = client.chat.create(model="qwen3-4b", messages=messages, record=True)
     assert response["choices"][0]["message"]["content"] == "SYNTHETIC_PRIVATE_OUTPUT"
     run_id = check_receipt(client, response)
     with Client(base_url=url, ca_file=ca_file, token_file=token_b) as other:
         assert other.models.list()["data"] == []
+        assert other.capabilities.get()["models"] == []
         try:
             other.evidence.get(run_id)
             raise AssertionError("cross-project evidence exposed")
@@ -83,11 +113,36 @@ with Client(**options) as client:
         chunks = list(stream)
         assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
         assert client.evidence.get(stream.run_id)["receipt_status"] == "ready"
+    response = client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
+                                  tool_choice="required", parallel_tool_calls=False,
+                                  max_completion_tokens=32, stop="END", n=1, record=True)
+    history = reply_history(response)
+    tool_run = check_receipt(client, response)
+    assert client.evidence.get(tool_run)["manifest"]["finish_reason"] == "tool_calls"
+    final = client.chat.create(model="qwen3-4b", messages=history, tools=tools, tool_choice="none")
+    assert final["choices"][0]["message"]["content"] == "SYNTHETIC_PRIVATE_OUTPUT"
+    with client.chat.stream(model="qwen3-4b", messages=messages, tools=tools,
+                            tool_choice="auto", parallel_tool_calls=False,
+                            stream_options={"include_usage": True}, record=True) as stream:
+        check_tool_stream(list(stream))
+        assert client.evidence.get(stream.run_id)["manifest"]["finish_reason"] == "tool_calls"
+    # The synthetic vLLM backend emits stop for named function calling. Both
+    # native client paths see the normalized public reason and signed metadata.
+    named = client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
+                               tool_choice=named_choice, record=True)
+    reply_history(named)
+    assert client.evidence.get(named.run_id)["manifest"]["finish_reason"] == "tool_calls"
+    with client.chat.stream(model="qwen3-4b", messages=messages, tools=tools,
+                            tool_choice=named_choice, stream_options={"include_usage": True},
+                            record=True) as stream:
+        check_tool_stream(list(stream))
+        assert client.evidence.get(stream.run_id)["manifest"]["finish_reason"] == "tool_calls"
 
 
 async def main():
     async with AsyncClient(**options) as client:
         assert (await client.models.list())["data"][0]["id"] == "qwen3-4b"
+        assert (await client.capabilities.get())["models"][0]["features"]["tool_calling"] is True
         response = await client.chat.create(model="qwen3-4b", messages=messages, record=True)
         assert (await client.evidence.get(response.run_id))["receipt_status"] == "ready"
         files = await client.evidence.download(response.run_id, exports / ("async-" + response.run_id))
@@ -95,6 +150,23 @@ async def main():
         async with client.chat.stream(model="qwen3-4b", messages=messages, record=True) as stream:
             assert len([chunk async for chunk in stream]) == 2
             assert (await client.evidence.get(stream.run_id))["receipt_status"] == "ready"
+        response = await client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
+                                           tool_choice="required", parallel_tool_calls=False,
+                                           max_completion_tokens=32, n=1, record=True)
+        history = reply_history(response)
+        files = await client.evidence.download(response.run_id, exports / ("async-tool-" + response.run_id))
+        verify_download(files, response.run_id)
+        final = await client.chat.create(model="qwen3-4b", messages=history, tools=tools, tool_choice="none")
+        assert final["choices"][0]["message"]["content"] == "SYNTHETIC_PRIVATE_OUTPUT"
+        async with client.chat.stream(model="qwen3-4b", messages=messages, tools=tools,
+                                      tool_choice=named_choice,
+                                      stream_options={"include_usage": True}, record=True) as stream:
+            check_tool_stream([chunk async for chunk in stream])
+            assert (await client.evidence.get(stream.run_id))["manifest"]["finish_reason"] == "tool_calls"
+        named = await client.chat.create(model="qwen3-4b", messages=messages, tools=tools,
+                                         tool_choice=named_choice, record=True)
+        reply_history(named)
+        assert (await client.evidence.get(named.run_id))["manifest"]["finish_reason"] == "tool_calls"
         async with client.chat.stream(model="qwen3-4b", messages=[{"role": "user", "content": "cancel"}], record=True) as stream:
             async for _ in stream:
                 break
@@ -108,4 +180,4 @@ async def main():
 
 
 asyncio.run(main())
-print("SDK TLS integration passed: sync, async, SSE, cancellation, schema, evidence export, offline verification, tamper and pin rejection, isolation")
+print("SDK TLS integration passed: sync, async, capabilities, tools, usage SSE, cancellation, schema, evidence export, offline verification, tamper and pin rejection, isolation")

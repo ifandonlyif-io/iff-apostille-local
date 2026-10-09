@@ -13,8 +13,28 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// Preserve the public text API while forwarding absent assistant text as null,
+// as used by Chat Completions function calls. Request validation distinguishes
+// absent/null content from a tool result's required string before decoding.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type message Message
+	if m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) != 0 {
+		return json.Marshal(struct {
+			message
+			Content *string `json:"content"`
+		}{message: message(m)})
+	}
+	return json.Marshal(message(m))
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 type Format struct {
 	Type       string `json:"type"`
@@ -25,13 +45,21 @@ type Format struct {
 	} `json:"json_schema"`
 }
 type Request struct {
-	Model          string    `json:"model"`
-	Messages       []Message `json:"messages"`
-	Stream         bool      `json:"stream,omitempty"`
-	Temperature    *float64  `json:"temperature,omitempty"`
-	TopP           *float64  `json:"top_p,omitempty"`
-	MaxTokens      int       `json:"max_tokens,omitempty"`
-	ResponseFormat *Format   `json:"response_format,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []Message       `json:"messages"`
+	Stream              bool            `json:"stream,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	N                   int             `json:"n,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
+	Tools               []Tool          `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	ResponseFormat      *Format         `json:"response_format,omitempty"`
+	toolSchemas         map[string]*schema.Schema
 }
 
 func strict(raw []byte, v any) error {
@@ -61,7 +89,11 @@ func objectShape(raw json.RawMessage, allowed, required string) (map[string]json
 		return nil, false
 	}
 	for k, v := range obj {
-		if !strings.Contains(" "+allowed+" ", " "+k+" ") || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		known := false
+		for _, name := range strings.Fields(allowed) {
+			known = known || k == name
+		}
+		if !known || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
 			return nil, false
 		}
 	}
@@ -74,13 +106,20 @@ func objectShape(raw json.RawMessage, allowed, required string) (map[string]json
 }
 
 func requestShape(raw []byte) bool {
-	o, ok := objectShape(raw, "model messages stream temperature top_p max_tokens response_format", "model messages")
+	o, ok := objectShape(raw, "model messages stream temperature top_p max_tokens max_completion_tokens n stop stream_options tools tool_choice parallel_tool_calls response_format", "model messages")
 	if !ok {
 		return false
 	}
-	if v, present := o["max_tokens"]; present {
-		var n int
-		if json.Unmarshal(v, &n) != nil || n < 1 {
+	for _, name := range []string{"max_tokens", "max_completion_tokens", "n"} {
+		if v, present := o[name]; present {
+			var n int
+			if json.Unmarshal(v, &n) != nil || n < 1 {
+				return false
+			}
+		}
+	}
+	if _, a := o["max_tokens"]; a {
+		if _, b := o["max_completion_tokens"]; b {
 			return false
 		}
 	}
@@ -89,9 +128,22 @@ func requestShape(raw []byte) bool {
 		return false
 	}
 	for _, message := range messages {
-		if _, ok := objectShape(message, "role content", "role content"); !ok {
+		if !messageShape(message) {
 			return false
 		}
+	}
+	if v, present := o["stream_options"]; present {
+		if _, ok := objectShape(v, "include_usage", "include_usage"); !ok {
+			return false
+		}
+	}
+	if v, present := o["tools"]; present {
+		if !toolsShape(v) {
+			return false
+		}
+	}
+	if v, present := o["tool_choice"]; present && !toolChoiceShape(v) {
+		return false
 	}
 	if v, present := o["response_format"]; present {
 		format, ok := objectShape(v, "type json_schema", "type json_schema")
@@ -117,10 +169,15 @@ func parseRequest(raw []byte, m config.Model) (Request, *schema.Schema, error) {
 	if len(r.Messages) == 0 || len(r.Messages) > 128 || r.Model == "" {
 		return bad()
 	}
-	for _, x := range r.Messages {
-		if (x.Role != "system" && x.Role != "user" && x.Role != "assistant") || x.Content == "" {
-			return bad()
-		}
+	if !validateMessages(r.Messages) || (r.N != 0 && r.N != 1) || !validStop(r.Stop) || (r.StreamOptions != nil && !r.Stream) {
+		return bad()
+	}
+	if err := prepareTools(&r, m); err != nil {
+		return r, nil, err
+	}
+	if r.MaxCompletionTokens != 0 {
+		r.MaxTokens = r.MaxCompletionTokens
+		r.MaxCompletionTokens = 0
 	}
 	if r.MaxTokens == 0 {
 		r.MaxTokens = m.MaxTokens
